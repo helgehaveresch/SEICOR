@@ -1,0 +1,11 @@
+Lebensdauer Videograbber
+
+Folie mit Anforderungen an das IMPACT: 
+- Abstand Teleskop und Reck
+- Überdachung
+- Platz 
+
+RMS
+- Streifen
+- vergleich für einzelne Blickrichtungen
+No2 variablilität

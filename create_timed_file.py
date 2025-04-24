@@ -1,13 +1,186 @@
+#%%
 from datetime import datetime, timedelta
+import pvlib
+import pytz
 
+def find_time_for_azimuth(latitude, longitude, date, target_azimuth, timezone='UTC', step_minutes=1):
+    """
+    Find the time at which the sun reaches a specified azimuth angle.
+
+    Parameters:
+        latitude (float): Latitude in decimal degrees.
+        longitude (float): Longitude in decimal degrees.
+        date (str): Date in the format 'YYYY-MM-DD'.
+        target_azimuth (float): Desired solar azimuth angle in degrees.
+        timezone (str): Timezone string (default: 'UTC').
+        step_minutes (int): Time step in minutes for iteration (default: 1).
+
+    Returns:
+        str: Time at which the sun reaches the target azimuth, or None if not found.
+    """
+    local_tz = pytz.timezone(timezone)
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    dt_start = local_tz.localize(datetime(date_obj.year, date_obj.month, date_obj.day, 0, 0, 0))
+    dt_end = dt_start + timedelta(days=1)
+    
+    current_dt = dt_start
+    closest_time = None
+    closest_diff = float('inf')
+    
+    while current_dt < dt_end:
+        solpos = pvlib.solarposition.get_solarposition(current_dt, latitude, longitude)
+        current_azimuth = solpos['azimuth'].values[0]
+        
+        diff = abs(current_azimuth - target_azimuth)
+        if diff < closest_diff:
+            closest_diff = diff
+            closest_time = current_dt.strftime('%H:%M:%S')
+        
+        current_dt += timedelta(minutes=step_minutes)
+    
+    if closest_time:
+        return datetime.strptime(closest_time, "%H:%M:%S")
+    return None
+
+def find_time_for_vza(latitude, longitude, date, target_vza, timezone='UTC', step_minutes=1):
+    """
+    Find the times at which the sun reaches a specified view zenith angle (VZA).
+
+    Parameters:
+        latitude (float): Latitude in decimal degrees.
+        longitude (float): Longitude in decimal degrees.
+        date (str): Date in the format 'YYYY-MM-DD'.
+        target_vza (float): Desired solar view zenith angle (VZA) in degrees.
+        timezone (str): Timezone string (default: 'UTC').
+        step_minutes (int): Time step in minutes for iteration (default: 1).
+
+    Returns:
+        tuple: (morning time, evening time) when the sun reaches the target VZA.
+    """
+    local_tz = pytz.timezone(timezone)
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    dt_start = local_tz.localize(datetime(date_obj.year, date_obj.month, date_obj.day, 0, 0, 0))
+    dt_end = dt_start + timedelta(days=1)
+    
+    current_dt = dt_start
+    morning_time = None
+    evening_time = None
+    
+    while current_dt < dt_end:
+        solpos = pvlib.solarposition.get_solarposition(current_dt, latitude, longitude)
+        vza = 90 - solpos['elevation'].values[0]  # Calculate VZA from elevation
+        
+        if abs(vza - target_vza) < 0.5:  # Allow small margin of error
+            if morning_time is None:
+                morning_time = current_dt.strftime('%H:%M:%S')
+            else:
+                evening_time = current_dt.strftime('%H:%M:%S')
+        
+        current_dt += timedelta(minutes=step_minutes)
+    
+    return (
+        datetime.strptime(morning_time, "%H:%M:%S") if morning_time else None,
+        datetime.strptime(evening_time, "%H:%M:%S") if evening_time else None,
+    )
+
+
+from datetime import datetime, timedelta
+import pvlib
+import pytz
+
+def find_time_for_azimuth(latitude, longitude, date, target_azimuth, timezone='UTC', step_minutes=1):
+    """
+    Find the time at which the sun reaches a specified azimuth angle.
+
+    Parameters:
+        latitude (float): Latitude in decimal degrees.
+        longitude (float): Longitude in decimal degrees.
+        date (str): Date in the format 'YYYY-MM-DD'.
+        target_azimuth (float): Desired solar azimuth angle in degrees.
+        timezone (str): Timezone string (default: 'UTC').
+        step_minutes (int): Time step in minutes for iteration (default: 1).
+
+    Returns:
+        str: Time at which the sun reaches the target azimuth, or None if not found.
+    """
+    local_tz = pytz.timezone(timezone)
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    dt_start = local_tz.localize(datetime(date_obj.year, date_obj.month, date_obj.day, 0, 0, 0))
+    dt_end = dt_start + timedelta(days=1)
+    
+    current_dt = dt_start
+    closest_time = None
+    closest_diff = float('inf')
+    
+    while current_dt < dt_end:
+        solpos = pvlib.solarposition.get_solarposition(current_dt, latitude, longitude)
+        current_azimuth = solpos['azimuth'].values[0]
+        
+        diff = abs(current_azimuth - target_azimuth)
+        if diff < closest_diff:
+            closest_diff = diff
+            closest_time = current_dt.strftime('%H:%M:%S')
+        
+        current_dt += timedelta(minutes=step_minutes)
+    
+    if closest_time:
+        return datetime.strptime(closest_time, "%H:%M:%S")
+    return None
+
+def find_time_for_vza(latitude, longitude, date, target_vza, timezone='UTC', step_minutes=1):
+    """
+    Find the times at which the sun reaches a specified view zenith angle (VZA).
+
+    Parameters:
+        latitude (float): Latitude in decimal degrees.
+        longitude (float): Longitude in decimal degrees.
+        date (str): Date in the format 'YYYY-MM-DD'.
+        target_vza (float): Desired solar view zenith angle (VZA) in degrees.
+        timezone (str): Timezone string (default: 'UTC').
+        step_minutes (int): Time step in minutes for iteration (default: 1).
+
+    Returns:
+        tuple: (morning time, evening time) when the sun reaches the target VZA.
+    """
+    local_tz = pytz.timezone(timezone)
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    dt_start = local_tz.localize(datetime(date_obj.year, date_obj.month, date_obj.day, 0, 0, 0))
+    dt_end = dt_start + timedelta(days=1)
+    
+    current_dt = dt_start
+    morning_time = None
+    evening_time = None
+    
+    while current_dt < dt_end:
+        solpos = pvlib.solarposition.get_solarposition(current_dt, latitude, longitude)
+        vza = 90 - solpos['elevation'].values[0]  # Calculate VZA from elevation
+        
+        if abs(vza - target_vza) < 0.5:  # Allow small margin of error
+            if morning_time is None:
+                morning_time = current_dt.strftime('%H:%M:%S')
+            else:
+                evening_time = current_dt.strftime('%H:%M:%S')
+        
+        current_dt += timedelta(minutes=step_minutes)
+    
+    return (
+        datetime.strptime(morning_time, "%H:%M:%S") if morning_time else None,
+        datetime.strptime(evening_time, "%H:%M:%S") if evening_time else None,
+    )
+
+
+latitude = 53.08475580
+longitude = 8.82082790
+vza_start_end = 96  # Target View Zenith Angle
+azimuth_target = 295  # Looking for when the sun is directly south
+date = "2025-03-31"
 # Define the start and end times
-start_time = datetime.strptime("06:40:01", "%H:%M:%S")
-end_time = datetime.strptime("19:00:00", "%H:%M:%S")
-time_step = timedelta(seconds=1)  # Increment time by 1 second
+noon_start = find_time_for_azimuth(latitude, longitude, date, azimuth_target-5)
+noon_end = find_time_for_azimuth(latitude, longitude, date, azimuth_target+5)
+start_time, end_time = find_time_for_vza(latitude, longitude, date, vza_start_end)
+time_step = timedelta(seconds=12)  # Increment time by 12 seconds
 special_interval = timedelta(minutes=30)  # Every 30 minutes
 special_duration = timedelta(minutes=1)  # Special line duration (1 min)
-noon_start = datetime.strptime("12:00:00", "%H:%M:%S")  # Start of noon window
-noon_end = datetime.strptime("12:10:00", "%H:%M:%S")  # End of noon window
 
 # File content header
 header = """**********************************************************
@@ -35,70 +208,35 @@ next_special_time = start_time  # Initialize first special event
 
 while current_time <= end_time:
     if current_time == next_special_time:
-        # Insert the special line for 1 minute (60 times)
-        for _ in range(60):
+        # Insert the special line for 1 minute (5 times for 12-second steps)
+        for _ in range(5):
             entries.append(f"{current_time.strftime('%H:%M:%S')}   90    270    _")
-            current_time += time_step  # Move forward by 1 second
+            current_time += time_step  # Move forward by 12 seconds
         
         # Schedule next special event
         next_special_time += special_interval
 
     # Check if current time falls within the noon window
     if noon_start <= current_time < noon_end:
-        vza_value = 175  # Modify viewing azimuth angle for 10 minutes
+        vza_value = azimuth_target+10  # Modify viewing azimuth angle for 10 minutes
     else:
-        vza_value = 180  # Default value
+        vza_value = azimuth_target  # Default value
 
     # Normal ship measurement line
     entries.append(f"{current_time.strftime('%H:%M:%S')}   15.9    {vza_value}    S")
-    current_time += time_step  # Move forward by 1 second
+    current_time += time_step  # Move forward by 12 seconds
 
 # Combine all lines with header and footer
 content = header + "\n".join(entries) + "\n" + footer + "\n"
 
 # Write to an .asc file
-with open(r"C:\Users\hhave\Desktop\amaxoma_times_SEICOR_IMPACT_ISO_v1", "w") as file:
-    file.write(content)
+#with open(r"C:\Users\hhave\Desktop\amaxoma_times_SEICOR_IMPACT_ISO_v2.asc", "w") as file:
+#    file.write(content)
 
 print("File 'output.asc' has been created successfully.")
 
-#%%
 
-import pvlib
-import datetime
-import pytz
+# %%
+find_time_for_azimuth(latitude, longitude, "2025-03-12" , 170+5.0)
 
-def get_solar_azimuth(latitude, longitude, date_time, timezone='UTC'):
-    """
-    Calculate the solar azimuth angle given latitude, longitude, and datetime.
-
-    Parameters:
-        latitude (float): Latitude in decimal degrees (positive for North, negative for South).
-        longitude (float): Longitude in decimal degrees (positive for East, negative for West).
-        date_time (str): Date and time in the format 'YYYY-MM-DD HH:MM:SS'.
-        timezone (str): Timezone string (default: 'UTC').
-
-    Returns:
-        float: Solar azimuth angle in degrees, where 0° is North.
-    """
-    # Convert date_time string to a localized datetime object
-    local_tz = pytz.timezone(timezone)
-    dt = datetime.datetime.strptime(date_time, "%Y-%m-%d %H:%M:%S")
-    dt = local_tz.localize(dt)
-
-    # Get solar position
-    solpos = pvlib.solarposition.get_solarposition(dt, latitude, longitude)
-
-    # Extract azimuth angle
-    azimuth = solpos['azimuth'].values[0]
-
-    return azimuth
-
-# Example usage:
-latitude = 40.7128  # New York City
-longitude = -74.0060
-date_time = "2025-03-08 12:00:00"
-timezone = "America/New_York"
-
-azimuth_angle = get_solar_azimuth(latitude, longitude, date_time, timezone)
-print(f"Solar Azimuth Angle: {azimuth_angle:.2f}°")
+# %%

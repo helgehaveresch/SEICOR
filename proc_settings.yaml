@@ -1,0 +1,21 @@
+global:
+  path_to_data: C:\Users\hhave\Nextcloud\Promotion\data
+  path_to_repo: C:\Users\hhave\Documents\Promotion\scripts
+
+processing:
+  do_dark_correction: TRUE
+  dark_file: P:\data\wedel\org\APR2025\250401ND.IMG
+  dark_file_n_spatial: 232
+  do_spatial_calibration: True
+  fiber_to_pixel: processing_settings\fiber_to_pixel_IMPACT2.txt
+  spatial_shift: 0
+  fiber_to_VEA: /path/to/fiber_to_VEA.fits
+  hg_cd_file: /path/to/hg-cd.fits
+  do_smear_correction: False
+  calibration: 
+    do_spectral_calibration: True
+    a0: 3.86200E+0002
+    a1: 1.32758E+0002
+    a2: -3.17468E+0000
+    a3: 0.0
+  structure: False
