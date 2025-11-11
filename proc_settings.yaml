@@ -4,10 +4,10 @@ global:
 
 processing:
   do_dark_correction: TRUE
-  dark_file: P:\data\wedel\org\APR2025\250401ND.IMG
+  dark_file: P:\data\data_tmp\org\APR2025\250401ND.IMG
   dark_file_n_spatial: 232
   do_spatial_calibration: True
-  fiber_to_pixel: processing_settings\fiber_to_pixel_IMPACT2.txt
+  fiber_to_pixel: C:\Users\hhave\Documents\Promotion\scripts\SEICOR\fiber_to_pixel_SEICOR.txt
   spatial_shift: 0
   fiber_to_VEA: /path/to/fiber_to_VEA.fits
   hg_cd_file: /path/to/hg-cd.fits
