@@ -1,0 +1,54 @@
+date: "250417"
+
+Instruments: 
+  IMPACT_SC_path: "E:/data/SLANT_25/APR2025"
+  IMPACT_SC_file_ending: "ID.NO2_VIS_fix_ref_250907"
+  do_reference_correction: true
+  SC_reference_offset_correction_files: "_D.NO2_VIS_fix_ref_250907"
+  lp_doas_dir: "P:/data/data_tmp/Open_Path/"
+  in_situ_path: "P:/data/data_tmp/InSitu/"
+  ais_dir: "P:/data/data_tmp/AIS/"
+  img_dir: "P:/data/data_tmp/video/" # directory containing daily zipped video files
+  instrument_location:
+    - 53.56958522848946
+    - 9.69174249821205
+
+processing:
+  ais_filter:
+    interpolation_limit: 60 #seconds
+    lat_lon_window: # [lat_min, lat_max, lon_min, lon_max] area of interest for ais data
+      - 53.4
+      - 53.8
+      - 9.3
+      - 10.0
+    lat_lon_window_small:
+      - 53.55
+      - 53.60
+      - 9.6
+      - 9.8
+    max_ship_length: 20 #in meters
+    distance_threshold: 0.002 #minimum ship distance in degrees from the instrument LOS
+
+  quality: 
+    min_rms_IMPACT: 0.01 #not applied in ervery operation!
+    min_rms_lp_doas: 0.0005
+    rolling_mean_window: 40
+
+  enhancement:
+    calculate_rolling_background: true
+    rolling_background_window: 500
+    calculate_polynomial_background: true
+    polynomial_background_degree: 8
+    calculate_high_pass_fft_background: true
+    high_pass_filter_time_period: 3000 # in seconds
+    run_upwind_doas_fit: true
+    nlin_param_file: P:/data/data_tmp/pars/nlin_d/SEICOR_D_offaxis.NO2_VIS_upwind
+
+Output:
+  plots_out_dir: "P:/data/data_tmp/analysis/"
+  img_out_dir: "P:/data/data_tmp/video/"
+  ship_passes_out_dir: "P:/data/data_tmp/ship_passes/"
+  plume_out_dir: "P:/data/data_tmp/plumes/"
+
+Plotting:
+  generate_plots: true

@@ -1,0 +1,203 @@
+#%%
+#this script processes the input data from IMPACT, LP-DOAS, IN-Situ, AIS and the video camera, to create unified datasets and sanity_check_plots for further analysis.
+import yaml
+import os
+import sys
+
+sys.path.append(r"C:\Users\hhave\Documents\Promotion\scripts")
+from doas_tools.file_handling import read_SC_file_imaging
+from imaging_tools.process_SC import mask_zenith, correct_destriped_for_noon_reference
+import SEICOR.ais
+import SEICOR.in_situ
+import SEICOR.lp_doas
+import SEICOR.video_camera
+import SEICOR.impact
+import SEICOR.enhancements
+import SEICOR.plotting
+import SEICOR.plumes
+
+settings_path = r"C:\Users\hhave\Documents\Promotion\scripts\SEICOR\plume_preprocessor_settings.yaml"
+with open(settings_path, 'r') as file:
+    settings = yaml.safe_load(file)
+
+date                    = settings["date"]
+instrument_settings     = settings["Instruments"]
+processing_settings     = settings["processing"]
+IMPACT_path             = instrument_settings["IMPACT_SC_path"]
+IMPACT_SC_file_ending   = instrument_settings["IMPACT_SC_file_ending"]
+do_ref_correction       = instrument_settings["do_reference_correction"]
+SC_ref_offset_corr      = instrument_settings["SC_reference_offset_correction_files"]
+instrument_location     = instrument_settings["instrument_location"]
+lat1, lon1              = instrument_settings["instrument_location"]
+lp_doas_dir             = instrument_settings["lp_doas_dir"]
+in_situ_path            = instrument_settings["in_situ_path"]
+ais_dir                 = instrument_settings["ais_dir"]
+img_dir                 = instrument_settings["img_dir"]
+ais_settings            = processing_settings["ais_filter"]
+lat_lon_window          = ais_settings["lat_lon_window"]  # [lat_min, lat_max, lon_min, lon_max] area of interest for ais data
+lat_lon_window_small    = ais_settings["lat_lon_window_small"]
+enhancement_settings    = processing_settings["enhancement"]
+
+img_out_dir             = os.path.join(settings["Output"]["img_out_dir"], "{}_video_ships".format(date))
+plumes_out_dir          = os.path.join(settings["Output"]["plume_out_dir"], f"plumes_{date}")
+out_dir                 = os.path.join(settings["Output"]["plots_out_dir"])
+#%% Initialize IMPACT measurements
+ds_impact = read_SC_file_imaging(IMPACT_path, date, IMPACT_SC_file_ending)
+if do_ref_correction:
+    ds_ref_corr = read_SC_file_imaging(IMPACT_path, date, SC_ref_offset_corr)
+    ds_impact = correct_destriped_for_noon_reference(ds_impact, ds_ref_corr)
+ds_impact = mask_zenith(ds_impact)
+ds_impact = SEICOR.enhancements.rolling_background_enh(ds_impact, window_size=enhancement_settings["rolling_background_window"])
+ds_impact = SEICOR.impact.rolling_impact(ds_impact, window=processing_settings["quality"]["rolling_mean_window"])
+endpoints_los = SEICOR.impact.calculate_LOS(ds_impact, instrument_location)
+lat2, lon2 = endpoints_los[:, 0], endpoints_los[:, 1] #todo: to be replaced 
+start_time, end_time, measurement_times = SEICOR.impact.calc_start_end_times(ds_impact)
+#%% Initialize in-situ data
+df_insitu = SEICOR.in_situ.read_in_situ(in_situ_path, date)
+df_insitu = SEICOR.in_situ.apply_time_mask_to_insitu(df_insitu, start_time, end_time)
+ds_impact = SEICOR.impact.calculate_path_averaged_vmr_no2(df_insitu, ds_impact)
+#%% Initialize lp-doas data
+df_lp_doas = SEICOR.lp_doas.read_lpdoas(lp_doas_dir, date)
+df_lp_doas = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
+df_lp_doas_SC = SEICOR.lp_doas.read_lpdoas(lp_doas_dir, date, mode="SC")
+df_lp_doas_SC = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas_SC, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
+
+mask, ds_impact_masked = SEICOR.impact.mask_rms_and_reduce_impact(ds_impact, rms_threshold=processing_settings["quality"]["min_rms_IMPACT"])
+ds_impact_masked = SEICOR.enhancements.polynomial_background_enh(ds_impact_masked, degree=enhancement_settings["polynomial_background_degree"])
+ds_impact_masked = SEICOR.enhancements.fft_background_enh(ds_impact_masked, t_cut=enhancement_settings["high_pass_filter_time_period"])
+df_lp_doas_SC = SEICOR.enhancements.polynomial_background_enh_lp_doas(df_lp_doas_SC, degree=enhancement_settings["polynomial_background_degree"])
+df_lp_doas_SC = SEICOR.enhancements.fft_background_enh_lp_doas(df_lp_doas_SC, t_cut=enhancement_settings["high_pass_filter_time_period"])
+
+#%% Initialize ais data
+df_ais = SEICOR.ais.prepare_ais(ais_dir, date, interpolation_limit = ais_settings["interpolation_limit"])
+df_ais, ship_groups, filtered_ship_groups = SEICOR.ais.pre_filter_ais(df_ais, lat_lon_window, start_time, end_time, length=ais_settings["max_ship_length"])
+#%% Filter ship passes
+df_ais, filtered_ship_groups, maskedout_groups, ship_passes = SEICOR.ais.filter_ship_passes(df_ais, 
+    ship_groups, filtered_ship_groups, start_time, end_time, measurement_times, endpoints_los, instrument_location, distance_threshold=ais_settings["distance_threshold"])
+#%%
+ship_passes = SEICOR.in_situ.add_wind_to_ship_passes(ship_passes, df_insitu)
+ship_passes = SEICOR.video_camera.assign_video_images_to_ship_pass(ship_passes, img_dir, date)
+ship_passes = SEICOR.plumes.add_plume_file_paths_to_ship_passes(ship_passes, plumes_out_dir)
+os.makedirs(settings["Output"]["ship_passes_out_dir"], exist_ok=True)
+ship_passes.to_csv(os.path.join(settings["Output"]["ship_passes_out_dir"], f"ship_passes_{date}.csv"))
+
+#%%
+for idx, ship_pass_single in ship_passes.iterrows():
+    ds_plume = SEICOR.enhancements.upwind_constant_background_enh(ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
+    if ds_plume is not None:
+        ds_plume = SEICOR.plumes.add_ship_trajectory_to_plume_ds(ds_plume, filtered_ship_groups)
+        ds_plume = SEICOR.plumes.add_insitu_to_plume_ds(ds_plume, df_insitu)
+        ds_plume = SEICOR.impact.call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds_plume, ship_pass_single, settings["processing"]["enhancement"]["nlin_param_file"], IMPACT_path)
+        ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
+        os.makedirs(plumes_out_dir, exist_ok=True)
+        ds_plume.to_netcdf(ship_pass_single['plume_file'])
+
+# %%
+if settings["Plotting"]["generate_plots"]:
+    SEICOR.plotting.plot_trajectories(
+        filtered_ship_groups, 
+        maskedout_groups, 
+        ship_passes, 
+        lon1, 
+        lon2, 
+        lat1, 
+        lat2, 
+        lat_lon_window_small, 
+        save=True, 
+        out_dir=out_dir)
+    
+    SEICOR.plotting.plot_maskedout_ships_details(
+        maskedout_groups, 
+        lat_lon_window_small, 
+        lon1, 
+        lon2, 
+        lat1, 
+        lat2, 
+        save=True, 
+        out_dir=out_dir)
+    
+    SEICOR.plotting.plot_ship_stats(
+        filtered_ship_groups, 
+        save=True, 
+        out_dir=out_dir)
+
+    SEICOR.plotting.plot_no2_timeseries(
+        ds_impact_masked, 
+        ship_passes, 
+        start_time, 
+        end_time, 
+        separate_legend=True, 
+        save=True, 
+        out_dir=out_dir)
+
+    SEICOR.plotting.plot_no2_enhancements_for_all_ships(
+        os.path.join(settings["Output"]["ship_passes_out_dir"], f"ship_passes_{date}.csv"),
+        os.path.join(out_dir, f"no2plots", "{}_no2plots".format(date)))
+    
+    SEICOR.plotting.plot_no2_enhancements_for_all_ships_full_overview(
+        os.path.join(settings["Output"]["ship_passes_out_dir"], f"ship_passes_{date}.csv"), 
+        os.path.join(out_dir, f"no2plots_full_overview", "{}_no2plots".format(date)), 
+        lat1, lon1, lat2, lon2, save=True)
+    
+    SEICOR.plotting.plot_wind_polar(
+        df_insitu,
+        save=True, 
+        out_dir=out_dir)
+    
+    SEICOR.plotting.plot_no2_enhancement_and_insitu(
+        ds_impact,
+        df_insitu,
+        ship_passes,
+        save=True, 
+        out_dir=out_dir)
+
+    SEICOR.plotting.plot_all_instruments_timeseries_VMR(
+        df_lp_doas,
+        df_insitu,
+        ds_impact,
+        ds_impact["VMR_NO2"],
+        df_closest=ship_passes,
+        title=f"NO$_2$ measurements on {date}",
+        save=True, 
+        out_dir=out_dir)
+    
+    SEICOR.plotting.plot_all_instruments_timeseries_SC(
+        df_lp_doas_SC,
+        df_insitu,
+        ds_impact,
+        df_closest=ship_passes,
+        title=f"NO$_2$ measurements on {date}",
+        save=True, 
+        out_dir=out_dir)
+    #SEICOR.plotting.plot_single_ship(
+    #    ds_impact, 
+    #    t_after_start_h=9.7,
+    #    interval_h=0.1, mode="dSCD")
+# %%
+import pandas as pd
+import xarray as xr
+ship_passes = pd.read_csv(os.path.join(settings["Output"]["ship_passes_out_dir"], f"ship_passes_{date}.csv"), index_col=0, parse_dates=True)
+ship_passes["Closest_Impact_Measurement_Time_Diff"] = pd.to_timedelta(
+    ship_passes["Closest_Impact_Measurement_Time_Diff"],
+    errors="coerce"   # converts unparsable -> NaT
+)
+ship_passes["Closest_Impact_Measurement_Time"] = pd.to_datetime(
+    ship_passes["Closest_Impact_Measurement_Time"], errors="coerce", utc=False
+)
+for idx, ship_pass_single in ship_passes.iterrows():
+    #check if plume_file exists
+    if not os.path.isfile(ship_pass_single['plume_file']):
+        print(f"Plume file {ship_pass_single['plume_file']} does not exist. Skipping.")
+        continue
+    with xr.open_dataset(ship_pass_single['plume_file']) as ds_handle:
+        ds_plume = ds_handle.load()
+    ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
+    os.makedirs(plumes_out_dir, exist_ok=True)
+    ds_plume.to_netcdf(ship_pass_single['plume_file'])
+# %%
+import xarray as xr
+ds = xr.open_dataset(r"P:\data\data_tmp\plumes\plumes_250511\plume_003_t_20250511_055606_mmsi_308445000.nc")
+
+
+
+# %%
