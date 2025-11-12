@@ -1,14 +1,18 @@
-date: "250417"
+date: "250511"
 
-Instruments: 
-  IMPACT_SC_path: "E:/data/SLANT_25/APR2025"
+base_paths:
+  windows: "P:\\data\\SEICOR"
+  linux: "/misc/dodecagon/BREDOM/SEICOR"
+
+Instruments: #relative to base_paths
+  IMPACT_SC_path: "IMPACT/SLANT_25" #month folder is added automatically using the date
   IMPACT_SC_file_ending: "ID.NO2_VIS_fix_ref_250907"
   do_reference_correction: true
   SC_reference_offset_correction_files: "_D.NO2_VIS_fix_ref_250907"
-  lp_doas_dir: "P:/data/data_tmp/Open_Path/"
-  in_situ_path: "P:/data/data_tmp/InSitu/"
-  ais_dir: "P:/data/data_tmp/AIS/"
-  img_dir: "P:/data/data_tmp/video/" # directory containing daily zipped video files
+  lp_doas_dir: "Open_Path"
+  in_situ_path: "InSitu"
+  ais_dir: "AIS"
+  img_dir: "video" # directory containing daily zipped video files
   instrument_location:
     - 53.56958522848946
     - 9.69174249821205
@@ -42,13 +46,13 @@ processing:
     calculate_high_pass_fft_background: true
     high_pass_filter_time_period: 3000 # in seconds
     run_upwind_doas_fit: true
-    nlin_param_file: P:/data/data_tmp/pars/nlin_d/SEICOR_D_offaxis.NO2_VIS_upwind
+    nlin_param_file: pars/nlin_d/SEICOR_D_offaxis.NO2_VIS_upwind
 
 Output:
-  plots_out_dir: "P:/data/data_tmp/analysis/"
-  img_out_dir: "P:/data/data_tmp/video/"
-  ship_passes_out_dir: "P:/data/data_tmp/ship_passes/"
-  plume_out_dir: "P:/data/data_tmp/plumes/"
+  plots_out_dir: "analysis"
+  img_out_dir: "video"
+  ship_passes_out_dir: "ship_passes"
+  plume_out_dir: "plumes"
 
 Plotting:
   generate_plots: true
