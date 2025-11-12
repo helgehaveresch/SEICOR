@@ -996,7 +996,7 @@ def plot_ship_pass_subplot_v2(
     )    
     ax3.text(
         min_lon + lon_margin - 0.005, min_lat + lat_margin + 0.013,
-        f"Ship\n{passing_ship["Mean_Speed"]:.1f} m/s",
+        f"Ship\n{passing_ship['Mean_Speed']:.1f} m/s",
         color='green', fontsize=10, ha='left', va='bottom',
         transform=ccrs.PlateCarree(), zorder=11,
         )
