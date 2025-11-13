@@ -1,1 +1,4 @@
-__pycache__
+**/__pycache__/
+__pycache__/enhancements.cpython-312.pyc
+__pycache__/plotting.cpython-312.pyc
+__pycache__/video_camera.cpython-312.pyc
