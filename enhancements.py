@@ -64,7 +64,7 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
                 no2_ref=(["image_row", "window_ref"], ds_impact["a[NO2]"].isel(dim_0=window_ref).values),
                 o4_ref=(["image_row", "window_ref"], ds_impact["a[O4]"].isel(dim_0=window_ref).values),
                 times_ref=(["window_ref"], np.array(pd.to_datetime(measurement_times[window_ref]), dtype='datetime64[ns]')),
-                vea=(["image_row"], ds_impact["los"].isel(dim_0=window[0]).values),
+                vea=(["image_row"], ds_impact.los[:,0].values),
                 vaa=(["window"], ds_impact["viewing-azimuth-angle"].isel(viewing_direction=0).values),
                 no2_enhancement_rolling_back=(["image_row", "window_plume"], ds_impact["NO2_enhancement_rolling_back"].isel(dim_0=window).values),
                 o4_enhancement_rolling_back=(["image_row", "window_plume"], ds_impact["O4_enhancement_rolling_back"].isel(dim_0=window).values),
@@ -91,6 +91,11 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
         lp_window_ref = ((df_lp.index >= ref_start) & (df_lp.index < ref_end))
         lp_no2_enhancement = df_lp['Fit Coefficient (NO2)'][lp_window] - df_lp['Fit Coefficient (NO2)'][lp_window_ref].mean()
 
+        lp_idx = df_lp.index
+        if isinstance(lp_idx, pd.DatetimeIndex) and lp_idx.tz is not None:
+            lp_idx = lp_idx.tz_convert("UTC").tz_localize(None)
+        lp_idx_window = lp_idx[lp_window]
+        lp_idx_window_ref = lp_idx[lp_window_ref]
 
         #add coord lp_window = np.where(lp_window)[0]
         ds = ds.assign_coords(
@@ -102,9 +107,9 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
             lp_no2=(["lp_window"], df_lp['Fit Coefficient (NO2)'][lp_window].values),
             lp_rms=(["lp_window"], df_lp['RMS'][lp_window].values),
             lp_no2_enhancement=(["lp_window"], lp_no2_enhancement.values),
-            lp_times_window=(["lp_window"], df_lp.index[lp_window]),
+            lp_times_window=(["lp_window"], np.array(lp_idx_window, dtype="datetime64[ns]")),
             lp_no2_ref=(["lp_window_ref"], df_lp['Fit Coefficient (NO2)'][lp_window_ref].values),
-            lp_times_window_ref=(["lp_window_ref"], df_lp.index[lp_window_ref])
+            lp_times_window_ref=(["lp_window_ref"], np.array(lp_idx_window_ref, dtype="datetime64[ns]"))
         )
     return ds
 
