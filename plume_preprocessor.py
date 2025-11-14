@@ -99,6 +99,82 @@ Path(ship_passes_out_dir).mkdir(parents=True, exist_ok=True)
 ship_passes.to_csv(ship_passes_out_dir / f"ship_passes_{date}.csv")
 
 #%%
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+
+def inspect_plume_patches(ds_plume,
+                         var="no2_enhancement_interpolate_background",
+                         time_key_in_attrs="t",
+                         times_coord="times_plume",
+                         row_slice=slice(4, 18),
+                         tol=pd.Timedelta(minutes=1)):
+    # get central plume time
+    if time_key_in_attrs in ds_plume.attrs:
+        t0 = pd.to_datetime(ds_plume.attrs[time_key_in_attrs])
+    elif time_key_in_attrs in ds_plume:
+        t0 = pd.to_datetime(ds_plume[time_key_in_attrs].values)
+    elif times_coord in ds_plume:
+        t0 = pd.to_datetime(ds_plume[times_coord].values).mean()
+    else:
+        raise RuntimeError("No plume timestamp found")
+    print(t0)
+    times = pd.to_datetime(ds_plume[times_coord].values)
+    win_mask = (times >= t0 - tol) & (times <= t0 + tol)
+    if not win_mask.any():
+        print("No frames in ±1min window around", t0)
+        return
+
+    arr = ds_plume[var].values  # possible shapes: (time, rows, cols) or (rows, cols)
+    # normalize to shape (n_frames, rows, cols)
+    if arr.ndim == 2:
+        arr = arr[np.newaxis, ...]
+    elif arr.ndim == 3:
+        # assume first axis aligns with times_coord/dim_0
+        arr = arr[win_mask.values]
+    else:
+        raise RuntimeError("Unexpected variable shape: " + str(arr.shape))
+
+    roi = arr[:, row_slice, :]  # (n_frames, rows_roi, cols)
+    img_means = arr.mean(axis=(1, 2))  # per-frame image mean
+    diffs = roi - img_means[:, None, None]
+
+    below_frac = (diffs < 0).mean(axis=(1, 2))
+    above_frac = (diffs > 0).mean(axis=(1, 2))
+
+    for i, (b, a) in enumerate(zip(below_frac, above_frac)):
+        print(f"frame {i}: fraction below mean = {b:.3f}, above mean = {a:.3f}")
+
+    # find a frame that contains both below and above pixels
+    good_idx = None
+    for i in range(diffs.shape[0]):
+        if (diffs[i] < 0).any() and (diffs[i] > 0).any():
+            good_idx = i
+            break
+
+    if good_idx is None:
+        print("No frame in window has both below- and above-mean pixels in the ROI.")
+        return
+
+    print("Example frame index with both patches:", good_idx, "min/max diff:",
+          diffs[good_idx].min(), diffs[good_idx].max())
+
+    # plot mean-diff image for the example frame
+    plt.figure(figsize=(8,4))
+    plt.subplot(1,2,1)
+    plt.title("ROI (example frame)")
+    plt.imshow(roi[good_idx], aspect="auto", cmap="viridis")
+    plt.colorbar(label=var)
+    plt.subplot(1,2,2)
+    plt.title("ROI - image mean")
+    im = plt.imshow(diffs[good_idx], aspect="auto", cmap="RdBu_r", vmin=-np.nanmax(np.abs(diffs[good_idx])), vmax=np.nanmax(np.abs(diffs[good_idx])))
+    plt.colorbar(im, label="difference from image mean")
+    plt.tight_layout()
+    plt.show()
+    print("plotted")
+
+
+
 for idx, ship_pass_single in ship_passes.iterrows():
     ds_plume = SEICOR.enhancements.upwind_constant_background_enh(ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
     if ds_plume is not None:
@@ -106,6 +182,10 @@ for idx, ship_pass_single in ship_passes.iterrows():
         ds_plume = SEICOR.plumes.add_insitu_to_plume_ds(ds_plume, df_insitu)
         #ds_plume = SEICOR.impact.call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds_plume, ship_pass_single, settings["processing"]["enhancement"]["nlin_param_file"], IMPACT_path)
         ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
+        try:
+            inspect_plume_patches(ds_plume)
+        except:
+            pass
         Path(plumes_out_dir).mkdir(parents=True, exist_ok=True)
         ds_plume.to_netcdf(ship_pass_single['plume_file'])
 
