@@ -12,10 +12,10 @@ from matplotlib.gridspec import GridSpec
 import cartopy.crs as ccrs
 import cartopy.io.img_tiles as cimgt
 from PIL import Image
-import datetime
 sys.path.append(os.path.dirname(__file__))
 from enhancements import upwind_constant_background_enh
-
+import zipfile
+from io import BytesIO
 
 
 def plot_LOS(lon1, lon2, lat1, lat2, ax=None, label=None):
@@ -746,11 +746,45 @@ def plot_ship_pass_subplot_v1(
 
     # Video image
     ax2 = fig.add_subplot(gs[0, 2])
-    if img_file and os.path.exists(img_file):
-        img = Image.open(img_file)
-        ax2.imshow(img)
-        ax2.set_title("Video image")
-        ax2.axis("off")
+    if img_file:
+        fname = os.path.basename(img_file)
+        fdir = os.path.dirname(img_file)
+        zip_candidate = fdir + ".zip"
+        shown = False
+        # First try zip (file_dir + ".zip")
+        if os.path.isfile(zip_candidate):
+            try:
+                with zipfile.ZipFile(zip_candidate, "r") as zf:
+                    member = None
+                    if fname in zf.namelist():
+                        member = fname
+                    else:
+                        for m in zf.namelist():
+                            if m.endswith("/" + fname) or m.endswith("\\" + fname) or m.endswith(fname):
+                                member = m
+                                break
+                    if member:
+                        data = zf.read(member)
+                        img = Image.open(BytesIO(data))
+                        ax2.imshow(img)
+                        ax2.set_title(f"Video image ({os.path.basename(zip_candidate)})")
+                        ax2.axis("off")
+                        shown = True
+            except Exception:
+                shown = False
+        # Fallback: direct file on disk
+        if not shown and os.path.exists(img_file):
+            try:
+                img = Image.open(img_file)
+                ax2.imshow(img)
+                ax2.set_title("Video image")
+                ax2.axis("off")
+                shown = True
+            except Exception:
+                shown = False
+        if not shown:
+            ax2.text(0.5, 0.5, "No image", ha="center", va="center")
+            ax2.axis("off")
     else:
         ax2.text(0.5, 0.5, "No image", ha="center", va="center")
         ax2.axis("off")
@@ -892,11 +926,48 @@ def plot_ship_pass_subplot_v2(
 
     # Video image
     ax2 = fig.add_subplot(gs[0, 2])
-    if img_file and os.path.exists(img_file):
-        img = Image.open(img_file)
-        ax2.imshow(img)
-        ax2.set_title("Video image")
-        ax2.axis("off")
+    if img_file:
+        print(img_file)
+        fname = os.path.basename(img_file)
+        fdir = os.path.dirname(img_file)
+        print(fdir)
+        zip_candidate = fdir + ".zip"
+        print(zip_candidate)
+        shown = False
+        # First try zip (file_dir + ".zip")
+        if os.path.isfile(zip_candidate):
+            try:
+                with zipfile.ZipFile(zip_candidate, "r") as zf:
+                    member = None
+                    if fname in zf.namelist():
+                        member = fname
+                    else:
+                        for m in zf.namelist():
+                            if m.endswith("/" + fname) or m.endswith("\\" + fname) or m.endswith(fname):
+                                member = m
+                                break
+                    if member:
+                        data = zf.read(member)
+                        img = Image.open(BytesIO(data))
+                        ax2.imshow(img)
+                        ax2.set_title(f"Video image ({os.path.basename(zip_candidate)})")
+                        ax2.axis("off")
+                        shown = True
+            except Exception:
+                shown = False
+        # Fallback: direct file on disk
+        if not shown and os.path.exists(img_file):
+            try:
+                img = Image.open(img_file)
+                ax2.imshow(img)
+                ax2.set_title("Video image")
+                ax2.axis("off")
+                shown = True
+            except Exception:
+                shown = False
+        if not shown:
+            ax2.text(0.5, 0.5, "No image", ha="center", va="center")
+            ax2.axis("off")
     else:
         ax2.text(0.5, 0.5, "No image", ha="center", va="center")
         ax2.axis("off")
