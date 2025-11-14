@@ -266,35 +266,5 @@ if settings["Plotting"]["generate_plots"]:
         title=f"NO$_2$ measurements on {date}",
         save=True, 
         out_dir=out_dir)
-    #SEICOR.plotting.plot_single_ship(
-    #    ds_impact, 
-    #    t_after_start_h=9.7,
-    #    interval_h=0.1, mode="dSCD")
-# %%
-import pandas as pd
-import xarray as xr
-ship_passes = pd.read_csv(os.path.join(settings["Output"]["ship_passes_out_dir"], f"ship_passes_{date}.csv"), index_col=0, parse_dates=True)
-ship_passes["Closest_Impact_Measurement_Time_Diff"] = pd.to_timedelta(
-    ship_passes["Closest_Impact_Measurement_Time_Diff"],
-    errors="coerce"   # converts unparsable -> NaT
-)
-ship_passes["Closest_Impact_Measurement_Time"] = pd.to_datetime(
-    ship_passes["Closest_Impact_Measurement_Time"], errors="coerce", utc=False
-)
-for idx, ship_pass_single in ship_passes.iterrows():
-    #check if plume_file exists
-    if not os.path.isfile(ship_pass_single['plume_file']):
-        print(f"Plume file {ship_pass_single['plume_file']} does not exist. Skipping.")
-        continue
-    with xr.open_dataset(ship_pass_single['plume_file']) as ds_handle:
-        ds_plume = ds_handle.load()
-    ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
-    os.makedirs(plumes_out_dir, exist_ok=True)
-    ds_plume.to_netcdf(ship_pass_single['plume_file'])
-# %%
-import xarray as xr
-ds = xr.open_dataset(r"P:\data\data_tmp\plumes\plumes_250511\plume_003_t_20250511_055606_mmsi_308445000.nc")
-
-
 
 # %%

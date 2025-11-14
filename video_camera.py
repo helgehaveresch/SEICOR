@@ -104,7 +104,7 @@ def assign_video_images_to_ship_pass(df_closest, img_dir, date):
     for t in df_closest.index:
         closest_file, time_diff = get_closest_image(img_files, img_times, t)
         # store the archive member path (for zip) or the filename (for dir)
-        closest_files.append(closest_file)
+        closest_files.append(os.path.join(dirpath,closest_file))
         time_diffs.append(time_diff)
 
     df_closest = df_closest.copy()
