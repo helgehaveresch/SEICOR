@@ -99,81 +99,289 @@ Path(ship_passes_out_dir).mkdir(parents=True, exist_ok=True)
 ship_passes.to_csv(ship_passes_out_dir / f"ship_passes_{date}.csv")
 
 #%%
-import matplotlib.pyplot as plt
-import pandas as pd
 import numpy as np
+from scipy import ndimage
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+import xarray as xr
+import pandas as pd
 
-def inspect_plume_patches(ds_plume,
-                         var="no2_enhancement_interpolate_background",
-                         time_key_in_attrs="t",
-                         times_coord="times_plume",
-                         row_slice=slice(4, 18),
-                         tol=pd.Timedelta(minutes=1)):
-    # get central plume time
-    if time_key_in_attrs in ds_plume.attrs:
-        t0 = pd.to_datetime(ds_plume.attrs[time_key_in_attrs])
-    elif time_key_in_attrs in ds_plume:
-        t0 = pd.to_datetime(ds_plume[time_key_in_attrs].values)
-    elif times_coord in ds_plume:
-        t0 = pd.to_datetime(ds_plume[times_coord].values).mean()
-    else:
-        raise RuntimeError("No plume timestamp found")
-    print(t0)
-    times = pd.to_datetime(ds_plume[times_coord].values)
-    win_mask = (times >= t0 - tol) & (times <= t0 + tol)
-    if not win_mask.any():
-        print("No frames in ±1min window around", t0)
-        return
+def detect_plume_ztest(
+    image,
+    bg_mean=None,
+    bg_std=None,
+    p_threshold=0.15,
+    min_cluster_size=20,
+    kernel_arm=1,
+    median_kernel_arm=None,
+    connectivity=1,
+):
+    """
+    Detect plume pixels using the neighborhood Z-test described (Kuhlmann et al. 2019).
+    - image: 2D numpy array (X_pix values, e.g. XCO2 or enhancement)
+    - bg_mean: scalar or 2D array with background mean (if None compute global mean)
+    - bg_std: scalar or 2D array with background std (if None compute global std)
+    - p_threshold: p-value cutoff (right-sided test). Default 0.20 as in text.
+    - min_cluster_size: remove clusters smaller than this (pixels).
+    - kernel_arm: arm length for the cross used for neighborhood mean (1 => center + 4 neighbors)
+    - median_kernel_arm: arm length for median smoothing kernel (if None uses kernel_arm+1)
+    - connectivity: connectivity for labeling (1 => 4-connectivity on 2D)
+    Returns binary mask (bool) of plume pixels.
+    """
+    if image.ndim != 2:
+        raise ValueError("image must be 2D")
 
-    arr = ds_plume[var].values  # possible shapes: (time, rows, cols) or (rows, cols)
-    # normalize to shape (n_frames, rows, cols)
-    if arr.ndim == 2:
-        arr = arr[np.newaxis, ...]
-    elif arr.ndim == 3:
-        # assume first axis aligns with times_coord/dim_0
-        arr = arr[win_mask.values]
-    else:
-        raise RuntimeError("Unexpected variable shape: " + str(arr.shape))
+    if bg_mean is None:
+        bg_mean = np.nanmean(image)
+    if bg_std is None:
+        bg_std = np.nanstd(image, ddof=0)
+    # allow bg_mean/bg_std to be scalars or arrays
+    bg_mean = np.asarray(bg_mean)
+    bg_std = np.asarray(bg_std)
 
-    roi = arr[:, row_slice, :]  # (n_frames, rows_roi, cols)
-    img_means = arr.mean(axis=(1, 2))  # per-frame image mean
-    diffs = roi - img_means[:, None, None]
+    # build cross-shaped footprint for neighborhood mean
+    size = 2 * kernel_arm + 1
+    footprint = np.zeros((size, size), dtype=bool)
+    c = kernel_arm
+    footprint[c, c] = True
+    for a in range(1, kernel_arm + 1):
+        footprint[c + a, c] = True
+        footprint[c - a, c] = True
+        footprint[c, c + a] = True
+        footprint[c, c - a] = True
 
-    below_frac = (diffs < 0).mean(axis=(1, 2))
-    above_frac = (diffs > 0).mean(axis=(1, 2))
+    # compute neighborhood mean while ignoring NaNs
+    def local_mean(arr, footprint):
+        # ndimage.generic_filter with nan handling
+        def _func(values):
+            vals = values[~np.isnan(values)]
+            return vals.mean() if vals.size else np.nan
+        return ndimage.generic_filter(arr, _func, footprint=footprint, mode="constant", cval=np.nan)
 
-    for i, (b, a) in enumerate(zip(below_frac, above_frac)):
-        print(f"frame {i}: fraction below mean = {b:.3f}, above mean = {a:.3f}")
+    neigh_mean = local_mean(image, footprint)
 
-    # find a frame that contains both below and above pixels
-    good_idx = None
-    for i in range(diffs.shape[0]):
-        if (diffs[i] < 0).any() and (diffs[i] > 0).any():
-            good_idx = i
-            break
+    # Z-score (right-sided test)
+    # if bg_mean/bg_std are scalars they broadcast, if arrays must match image shape
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = (neigh_mean - bg_mean) / bg_std
+    # p = P(sample >= observed) under H0 where H0 mean==bg_mean -> right-sided p = 1 - CDF(z)
+    # but text defines p = CDF(-z) which equals 1 - CDF(z) for normal
+    pvals = norm.cdf(-z)
 
-    if good_idx is None:
-        print("No frame in window has both below- and above-mean pixels in the ROI.")
-        return
+    # initial binary mask: reject H0 when p <= p_threshold (plume pixel)
+    mask_ini = (pvals <= p_threshold) & (~np.isnan(pvals))
+    mask = mask_ini
+    # median filter smoothing with larger cross kernel (arms +1 by default)
+    if median_kernel_arm is None:
+        median_kernel_arm = kernel_arm + 1
+    size_m = 2 * median_kernel_arm + 1
+    footprint_m = np.zeros((size_m, size_m), dtype=bool)
+    cm = median_kernel_arm
+    footprint_m[cm, cm] = True
+    for a in range(1, median_kernel_arm + 1):
+        footprint_m[cm + a, cm] = True
+        footprint_m[cm - a, cm] = True
+        footprint_m[cm, cm + a] = True
+        footprint_m[cm, cm - a] = True
 
-    print("Example frame index with both patches:", good_idx, "min/max diff:",
-          diffs[good_idx].min(), diffs[good_idx].max())
+    # median filter (apply to integer mask)
+    mask_smoothed = ndimage.median_filter(mask.astype(np.uint8), footprint=footprint_m, mode="constant", cval=0)
+    mask = mask_smoothed.astype(bool)
 
-    # plot mean-diff image for the example frame
-    plt.figure(figsize=(8,4))
-    plt.subplot(1,2,1)
-    plt.title("ROI (example frame)")
-    plt.imshow(roi[good_idx], aspect="auto", cmap="viridis")
-    plt.colorbar(label=var)
-    plt.subplot(1,2,2)
-    plt.title("ROI - image mean")
-    im = plt.imshow(diffs[good_idx], aspect="auto", cmap="RdBu_r", vmin=-np.nanmax(np.abs(diffs[good_idx])), vmax=np.nanmax(np.abs(diffs[good_idx])))
-    plt.colorbar(im, label="difference from image mean")
-    plt.tight_layout()
-    plt.show()
-    print("plotted")
+    # remove small clusters and keep the largest cluster per description
+    labeled, ncomp = ndimage.label(mask, structure=ndimage.generate_binary_structure(2, connectivity))
+    if ncomp == 0:
+        return mask  # empty
+    #print(f"mask has {ncomp} initial clusters labeled {labeled}")
+
+    sizes = ndimage.sum(mask, labeled, range(1, ncomp + 1))
+    # remove clusters smaller than min_cluster_size
+    keep_labels = [i + 1 for i, s in enumerate(sizes) if s >= min_cluster_size]
+    if not keep_labels:
+        return np.zeros_like(mask, dtype=bool)
+
+    # build mask containing only clusters >= threshold
+    mask_filtered = np.isin(labeled, keep_labels)
+
+    # choose largest cluster as final plume mask
+    sizes_keep = [(lab, s) for lab, s in zip(range(1, ncomp + 1), sizes) if (lab in keep_labels)]
+    largest_label = max(sizes_keep, key=lambda x: x[1])[0]
+    final_mask = (labeled == largest_label)
+
+    return final_mask
+
+def detect_plume_ztest_left(
+    image,
+    bg_mean=None,
+    bg_std=None,
+    p_threshold=0.3,
+    min_cluster_size=10,
+    kernel_arm=0,
+    median_kernel_arm=None,
+    connectivity=1,
+):
+    """
+    Left-sided neighborhood Z-test to detect negative enhancements.
+    H0: neigh_mean >= bg_mean
+    H1: neigh_mean < bg_mean
+    Reject H0 when p <= p_threshold (p = CDF(z)).
+    Returns: final_mask, ncomp, labeled, sizes, mask_filtered, pvals, mask_ini
+    """
+    if image.ndim != 2:
+        raise ValueError("image must be 2D")
+
+    if bg_mean is None:
+        bg_mean = np.nanmean(image)
+    if bg_std is None:
+        bg_std = np.nanstd(image, ddof=0)
+    bg_mean = np.asarray(bg_mean)
+    bg_std = np.asarray(bg_std)
+    
+    size = 2 * kernel_arm + 1
+    footprint = np.zeros((size, size), dtype=bool)
+    c = kernel_arm
+    footprint[c, c] = True
+    for a in range(1, kernel_arm + 1):
+        footprint[c + a, c] = True
+        footprint[c - a, c] = True
+        footprint[c, c + a] = True
+        footprint[c, c - a] = True
+
+    def local_mean(arr, footprint):
+        def _func(values):
+            vals = values[~np.isnan(values)]
+            return vals.mean() if vals.size else np.nan
+        return ndimage.generic_filter(arr, _func, footprint=footprint, mode="constant", cval=np.nan)
+
+    neigh_mean = local_mean(image, footprint)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = (neigh_mean - bg_mean) / bg_std
+
+    # left-sided p-value: p = CDF(z)
+    pvals = norm.cdf(z)
+
+    mask_ini = (pvals <= p_threshold) & (~np.isnan(pvals))
+    mask = mask_ini
+
+    if median_kernel_arm is None:
+        median_kernel_arm = kernel_arm + 1
+    size_m = 2 * median_kernel_arm + 1
+    footprint_m = np.zeros((size_m, size_m), dtype=bool)
+    cm = median_kernel_arm
+    footprint_m[cm, cm] = True
+    for a in range(1, median_kernel_arm + 1):
+        footprint_m[cm + a, cm] = True
+        footprint_m[cm - a, cm] = True
+        footprint_m[cm, cm + a] = True
+        footprint_m[cm, cm - a] = True
+
+    mask_smoothed = ndimage.median_filter(mask.astype(np.uint8), footprint=footprint_m, mode="constant", cval=0)
 
 
+    labeled, ncomp = ndimage.label(mask, structure=ndimage.generate_binary_structure(2, connectivity))
+    if ncomp == 0:
+        #print("no ship pixels detected after filtering")
+        return mask
+
+    sizes = ndimage.sum(mask, labeled, range(1, ncomp + 1))
+    keep_labels = [i + 1 for i, s in enumerate(sizes) if s >= min_cluster_size]
+    if not keep_labels:
+        #print("no ship pixels detected after filtering")
+        return np.zeros_like(mask, dtype=bool)
+
+    mask_filtered = np.isin(labeled, keep_labels)
+    sizes_keep = [(lab, s) for lab, s in zip(range(1, ncomp + 1), sizes) if (lab in keep_labels)]
+    largest_label = max(sizes_keep, key=lambda x: x[1])[0]
+    final_mask = (labeled == largest_label)
+    if final_mask.any() == None:
+        #print("no ship pixels detected after filtering")
+        return np.zeros(image.shape, dtype=bool)
+    return final_mask
+
+def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_ship=0.3):
+    if "no2_enhancement_interp" not in ds_plume:
+        print("no NO2_enhancement_interp in dataset")
+        return ds_plume
+    slice_rows = slice(8,20)
+    tol = pd.Timedelta("50s")
+    times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
+    t0 = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
+    win_mask = (times >= (t0 - tol)) & (times <= (t0 + tol))
+    idx = np.nonzero(win_mask)[0]
+    image_cut_plume = ds_plume["no2_enhancement_interp"].isel(image_row = slice_rows, window_plume = idx).values
+    mask = detect_plume_ztest(image_cut_plume, bg_mean = ds_plume["no2_enhancement_interp"].mean().values, bg_std= ds_plume["no2_enhancement_interp"].std().values, p_threshold=p_threshold_plume)
+
+    image_full = ds_plume["no2_enhancement_interp"].values
+
+    # create full-size mask and put the detected mask into the correct location
+    mask_full = np.zeros_like(image_full, dtype=bool)
+    # slice_rows is a slice object, idx is the 1D array of time/column indices
+    mask_full[slice_rows, idx] = mask
+
+    # plot image with plume boundary overlay
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(image_full, origin="lower", aspect="auto", cmap="viridis")
+    fig.colorbar(im, ax=ax, label="NO$_2$ enhancement")
+
+    # semi-transparent overlay for the mask (correct location)
+    #ax.imshow(np.ma.masked_where(~mask_full, mask_full), origin="lower", cmap="Reds", alpha=0.25, aspect="auto")
+
+    # draw boundary around the mask region
+    ax.contour(mask_full.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+
+    ax.set_title("NO$_2$ enhancement with plume mask boundary (placed at correct location)")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    plume_found = False
+    ship_found = False
+    if mask_full.sum() > 0:
+        plume_found = True
+        savepath = out_dir / f"plume_detection" / f"plumes_{date}" / f"ship_yes" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_plume.png"
+        os.makedirs(os.path.dirname(savepath), exist_ok=True)
+        plt.savefig(savepath)
+    plt.close('all')
+    if plume_found == False:
+        slice_rows = slice(4,10)
+        tol = pd.Timedelta("50s")
+        times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
+        t0 = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
+        win_mask = (times >= (t0 - tol)) & (times <= (t0 + tol))
+        idx = np.nonzero(win_mask)[0]
+        image_cut_ship = ds_plume["no2_enhancement_interp"].isel(image_row = slice_rows, window_plume = idx).values
+        mask = detect_plume_ztest_left(image_cut_ship, bg_mean = ds_plume["no2_enhancement_interp"].mean().values, bg_std= ds_plume["no2_enhancement_interp"].std().values, p_threshold=p_threshold_ship, min_cluster_size=20)
+
+        image_full = ds_plume["no2_enhancement_interp"].values
+
+        # create full-size mask and put the detected mask into the correct location
+        mask_full = np.zeros_like(image_full, dtype=bool)
+        # slice_rows is a slice object, idx is the 1D array of time/column indices
+        mask_full[slice_rows, idx] = mask
+
+        # plot image with plume boundary overlay
+        fig, ax = plt.subplots(figsize=(8, 6))
+        im = ax.imshow(image_full, origin="lower", aspect="auto", cmap="viridis")
+        fig.colorbar(im, ax=ax, label="NO$_2$ enhancement")
+
+        # draw boundary around the mask region
+        ax.contour(mask_full.astype(int), levels=[0.5], colors="blue", linewidths=1.5, origin="lower")
+
+        ax.set_title("NO$_2$ enhancement with plume mask boundary (placed at correct location)")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        if mask_full.sum() == 0:
+            savepath = out_dir / f"plume_detection" / f"plumes_{date}" / f"ship_no" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_out.png"
+            os.makedirs(os.path.dirname(savepath), exist_ok=True)
+            plt.savefig(savepath)
+        else:
+            ship_found = True
+            savepath = out_dir / f"plume_detection" / f"plumes_{date}" / f"ship_yes" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_ship.png"
+            os.makedirs(os.path.dirname(savepath), exist_ok=True)
+            plt.savefig(savepath)
+    plt.close('all')
+    ds_plume["plume_or_ship_found"] = plume_found or ship_found
+    return ds_plume
+#%%
 
 for idx, ship_pass_single in ship_passes.iterrows():
     ds_plume = SEICOR.enhancements.upwind_constant_background_enh(ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
@@ -182,10 +390,7 @@ for idx, ship_pass_single in ship_passes.iterrows():
         ds_plume = SEICOR.plumes.add_insitu_to_plume_ds(ds_plume, df_insitu)
         #ds_plume = SEICOR.impact.call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds_plume, ship_pass_single, settings["processing"]["enhancement"]["nlin_param_file"], IMPACT_path)
         ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
-        try:
-            inspect_plume_patches(ds_plume)
-        except:
-            pass
+        ds_plume = sort_plumes(ds_plume, out_dir, p_threshold_plume=0.02, p_threshold_ship=0.02, date=date)
         Path(plumes_out_dir).mkdir(parents=True, exist_ok=True)
         ds_plume.to_netcdf(ship_pass_single['plume_file'])
 

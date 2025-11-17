@@ -927,12 +927,9 @@ def plot_ship_pass_subplot_v2(
     # Video image
     ax2 = fig.add_subplot(gs[0, 2])
     if img_file:
-        print(img_file)
         fname = os.path.basename(img_file)
         fdir = os.path.dirname(img_file)
-        print(fdir)
         zip_candidate = fdir + ".zip"
-        print(zip_candidate)
         shown = False
         # First try zip (file_dir + ".zip")
         if os.path.isfile(zip_candidate):
