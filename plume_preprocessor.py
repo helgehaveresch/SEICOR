@@ -133,6 +133,38 @@ for idx, ship_pass_single in ship_passes.iterrows():
         ds_plume.to_netcdf(ship_pass_single['plume_file'])
 
 # %%
+import xarray as xr
+for idx, row in ship_passes.iterrows():
+    plume_file = row['plume_file']
+    try:
+        ds_plume = xr.open_dataset(plume_file)
+        plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
+        if plume_found:
+            mask = SEICOR.plumes.detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=20)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_c_back"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+
+        ds_plume = xr.open_dataset(plume_file)
+        plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
+        if plume_found:
+            mask = SEICOR.plumes.detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=20)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_c_back"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}_c_back", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}_c_back" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+
+    except Exception as e:
+        print(f"Could not open plume file {plume_file}: {e}")
+
+#%%
 if settings["Plotting"]["generate_plots"]:
     SEICOR.plotting.plot_trajectories(
         filtered_ship_groups, 
