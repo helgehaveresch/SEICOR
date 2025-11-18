@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from numpy.fft import fft, ifft, fftfreq
+import SEICOR.plumes
 
 
 def rolling_background_enh(ds, window_size=500): 
@@ -25,6 +26,7 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
     # Find reference window
     ref_found = False
     ref_offset = 3
+    ref_quality_try_idx = 1
     while not ref_found and ref_offset < ref_search_minutes:
         ref_start = t - pd.Timedelta(minutes=ref_offset)
         ref_end = t - pd.Timedelta(minutes=ref_offset - ref_window_minutes)
@@ -39,7 +41,14 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
                 other_ships_in_window = True
                 break
         if not other_ships_in_window and window_ref.sum() > 0:
-            ref_found = True
+            ref_image = ds_impact["a[NO2]"].isel(dim_0=window_ref) - ds_impact["a[NO2]"].isel(dim_0=window_ref).mean(dim="dim_0")
+            mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=20) #make sure no plume in ref
+            if mask.sum() == 0:
+                ref_found = True
+            else:
+                #print(f"Reference window contains enhancements. Try {ref_quality_try_idx}. Trying next window")
+                ref_offset += 1
+                ref_quality_try_idx += 1
         else:
             ref_offset += 1
     if not ref_found:
@@ -127,6 +136,7 @@ def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times,
     # Find reference window
     ref_found = False
     ref_offset = 3
+    ref_quality_try_idx = 1
     while not ref_found and ref_offset < ref_search_minutes:
         ref_start = t - pd.Timedelta(minutes=ref_offset)
         ref_end = t - pd.Timedelta(minutes=ref_offset - ref_window_minutes)
@@ -141,13 +151,22 @@ def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times,
                 other_ships_in_window = True
                 break
         if not other_ships_in_window and window_ref.sum() > 0:
-            ref_found = True
+            ref_image = ds_impact["a[NO2]"].isel(dim_0=window_ref) - ds_impact["a[NO2]"].isel(dim_0=window_ref).mean(dim="dim_0")
+            mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=20) #make sure no plume in ref
+            if mask.sum() == 0:
+                ref_found = True
+            else:
+                #print(f"Reference window contains enhancements. Try {ref_quality_try_idx}. Trying next window")
+                ref_quality_try_idx += 1
+                ref_offset += 1
+
         else:
             ref_offset += 1
     if not ref_found:
         print(f"No clean upwind reference window found for MMSI {mmsi} at {t}")
         return ds
     
+    ref_quality_try_idx = 1
     downwind_ref_found = False
     downwind_ref_offset = window_minutes[1] + 3
     while not downwind_ref_found and downwind_ref_offset < ref_search_minutes:
@@ -164,7 +183,14 @@ def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times,
                 other_ships_in_window = True
                 break
         if not other_ships_in_window and downwind_window_ref.sum() > 0:
-            downwind_ref_found = True
+            ref_image = ds_impact["a[NO2]"].isel(dim_0=downwind_window_ref) - ds_impact["a[NO2]"].isel(dim_0=downwind_window_ref).mean(dim="dim_0")
+            mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=20) #make sure no plume in ref
+            if mask.sum() == 0:
+                downwind_ref_found = True
+            else:
+                #print(f"Reference window contains enhancements. Try {ref_quality_try_idx}. Trying next window")
+                ref_quality_try_idx += 1
+                downwind_ref_offset += 1
         else:
             downwind_ref_offset += 1
     if not downwind_ref_found:
