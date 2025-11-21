@@ -133,6 +133,192 @@ for idx, ship_pass_single in ship_passes.iterrows():
         ds_plume.to_netcdf(ship_pass_single['plume_file'])
 
 # %%
+import numpy as np
+from scipy import ndimage
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+import pandas as pd
+
+def detect_plume_ztest(
+    image,
+    bg_mean=None,
+    bg_std=None,
+    p_threshold=0.15,
+    min_cluster_size=20,
+    kernel_arm=1,
+    median_kernel_arm=None,
+    connectivity=1,
+    # new options for source-connection checking
+    require_connection=False,
+    time_tol_seconds=30,
+    viewdir_min=8,
+    viewdir_max=18,
+    # option to keep second largest cluster
+    keep_second_largest=False,
+    second_size_threshold=None,
+):
+    """
+    Detect plume pixels using the neighborhood Z-test described (Kuhlmann et al. 2019).
+
+    New parameters:
+    - require_connection: if True, at least one kept cluster must intersect the source region.
+    - t0: central timestamp of source event (datetime or numeric same units as time_grid).
+    - time_grid: 2D array (same shape as image) with timestamp per pixel (datetime64 or numeric seconds).
+    - viewdir_grid: 2D array (same shape as image) with viewing direction per pixel (numeric).
+    - time_tol_seconds: tolerance around t0 (seconds) to define source-region in time.
+    - viewdir_min/viewdir_max: viewing direction window to define source-region.
+    - keep_second_largest: if True, also include second largest cluster when it exceeds second_size_threshold.
+    - second_size_threshold: required size (pixels) for second largest cluster to be kept. If None defaults to min_cluster_size.
+    """
+    kernel_arm=1
+    if image.ndim != 2:
+        raise ValueError("image must be 2D")
+
+    if bg_mean is None:
+        bg_mean = np.nanmean(image)
+    if bg_std is None:
+        bg_std = np.nanstd(image, ddof=0)
+    bg_mean = np.asarray(bg_mean)
+    bg_std = np.asarray(bg_std)
+
+    # build cross-shaped footprint for neighborhood mean
+    size = 2 * kernel_arm + 1
+    footprint = np.zeros((size, size), dtype=bool)
+    c = kernel_arm
+    footprint[c, c] = True
+    for a in range(1, kernel_arm + 1):
+        footprint[c + a, c] = True
+        footprint[c - a, c] = True
+        footprint[c, c + a] = True
+        footprint[c, c - a] = True
+
+    # compute neighborhood mean while ignoring NaNs
+    def local_mean(arr, footprint):
+        def _func(values):
+            vals = values[~np.isnan(values)]
+            return vals.mean() if vals.size else np.nan
+        return ndimage.generic_filter(arr, _func, footprint=footprint, mode="constant", cval=np.nan)
+
+    neigh_mean = local_mean(image, footprint)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = (neigh_mean - bg_mean) / bg_std
+    pvals = norm.cdf(-z)
+
+    mask = (pvals <= p_threshold) & (~np.isnan(pvals))
+
+    if median_kernel_arm is None:
+        median_kernel_arm = kernel_arm + 1
+    size_m = 2 * median_kernel_arm + 1
+    footprint_m = np.zeros((size_m, size_m), dtype=bool)
+    cm = median_kernel_arm
+    footprint_m[cm, cm] = True
+    for a in range(1, median_kernel_arm + 1):
+        footprint_m[cm + a, cm] = True
+        footprint_m[cm - a, cm] = True
+        footprint_m[cm, cm + a] = True
+        footprint_m[cm, cm - a] = True
+
+    #mask_smoothed = ndimage.median_filter(mask.astype(np.uint8), footprint=footprint_m, mode="constant", cval=0)
+    #mask = mask_smoothed.astype(bool)
+
+    labeled, ncomp = ndimage.label(mask, structure=ndimage.generate_binary_structure(2, connectivity))
+    if ncomp == 0:
+        return mask  # empty
+    
+    #sort out all clusters smaller than min_cluster_size
+    sizes = ndimage.sum(mask, labeled, range(1, ncomp + 1))
+    keep_labels = [i + 1 for i, s in enumerate(sizes) if s >= min_cluster_size]
+    if not keep_labels:
+        return np.zeros_like(mask, dtype=bool)
+
+    if require_connection:
+            # helper: build source_mask if required
+        source_mask = None
+        # assume times_plume is 1D (columns) and image_row is 1D (rows)
+        times_1d = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
+        t0_dt = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
+
+        # 1D boolean masks
+        time_ok_1d = np.abs(times_1d - t0_dt) <= pd.Timedelta(seconds=time_tol_seconds)
+        vd_1d = np.asarray(ds_plume.image_row)
+        view_ok_1d = (vd_1d >= viewdir_min) & (vd_1d <= viewdir_max)
+
+        # broadcast to image shape: time -> columns, view -> rows
+        try:
+            time_ok = np.broadcast_to(time_ok_1d[None, :], image.shape)   # shape (rows, cols)
+            view_ok = np.broadcast_to(view_ok_1d[:, None], image.shape)   # shape (rows, cols)
+        except Exception:
+            # fallback if broadcast_to fails (shouldn't), use tile
+            time_ok = np.tile(time_ok_1d[None, :], (image.shape[0], 1))
+            view_ok = np.tile(view_ok_1d[:, None], (1, image.shape[1]))
+
+        source_mask = time_ok & view_ok
+
+        if source_mask.shape != image.shape:
+            raise ValueError("time_grid and viewdir_grid must have same shape as image")
+    # filter clusters by min size first
+    mask_filtered = np.isin(labeled, keep_labels)
+
+    kept_sizes = [(lab, s) for lab, s in zip(range(1, ncomp + 1), sizes) if lab in keep_labels]
+    if not kept_sizes:
+        return np.zeros_like(mask, dtype=bool)
+
+    # sort kept clusters by size descending
+    kept_sizes_sorted = sorted(kept_sizes, key=lambda x: x[1], reverse=True)
+    largest_label = kept_sizes_sorted[0][0]
+    largest_size = kept_sizes_sorted[0][1]
+
+    # default final mask = largest cluster
+    final_mask = (labeled == largest_label)
+
+    # if second largest requested, note its label/size
+    sec_label = sec_size = None
+    if len(kept_sizes_sorted) > 1:
+        sec_label, sec_size = kept_sizes_sorted[1]
+    second_threshold = second_size_threshold if second_size_threshold is not None else min_cluster_size
+
+    # if connection to source is required, enforce rules described:
+    if require_connection:
+        # list of kept labels that intersect the source region
+        intersecting_labels = [lab for lab, _ in kept_sizes_sorted if np.any((labeled == lab) & source_mask)]
+
+        # if no kept cluster intersects source region -> no contour
+        if not intersecting_labels:
+            return np.zeros_like(mask, dtype=bool)
+
+        # if largest cluster intersects source -> plot it (and optionally second largest)
+        if largest_label in intersecting_labels:
+            final_mask = (labeled == largest_label)
+            if keep_second_largest and sec_label is not None and sec_size >= second_threshold:
+                final_mask = final_mask | (labeled == sec_label)
+            return final_mask
+
+        # largest cluster does NOT intersect source region, but at least one cluster does
+        # pick the intersecting cluster with largest size (closest/most significant in source region)
+        # build dict for sizes to pick the largest intersecting cluster
+        sizes_dict = {lab: s for lab, s in kept_sizes_sorted}
+        best_intersect_label = max(intersecting_labels, key=lambda L: sizes_dict.get(L, 0))
+
+        # plot the intersecting cluster instead (discard largest)
+        final_mask = (labeled == best_intersect_label)
+
+        # if keep_second_largest requested, also include the original largest cluster
+        if keep_second_largest:
+            final_mask = final_mask | (labeled == largest_label)
+
+        return final_mask
+
+    # if require_connection is False: keep previous behavior (largest, optionally second largest)
+    if keep_second_largest and sec_label is not None and sec_size >= second_threshold:
+        final_mask = final_mask | (labeled == sec_label)
+
+    return final_mask
+
+
+
+
+
 import xarray as xr
 for idx, row in ship_passes.iterrows():
     plume_file = row['plume_file']
@@ -140,26 +326,297 @@ for idx, row in ship_passes.iterrows():
         ds_plume = xr.open_dataset(plume_file)
         plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
         if plume_found:
-            mask = SEICOR.plumes.detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=20)
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.15, min_cluster_size=5, connectivity=1, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
             plt.figure(figsize=(10, 6))
-            plt.imshow(ds_plume["no2_enhancement_c_back"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
             plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
             plt.title("No2 enhancement with detected plume pixels")
-            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}", exist_ok=True)
-            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}0", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}0" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
             plt.close('all')
-
-        ds_plume = xr.open_dataset(plume_file)
-        plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
-        if plume_found:
-            mask = SEICOR.plumes.detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=20)
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=5, connectivity=1, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
             plt.figure(figsize=(10, 6))
-            plt.imshow(ds_plume["no2_enhancement_c_back"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
             plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
             plt.title("No2 enhancement with detected plume pixels")
-            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}_c_back", exist_ok=True)
-            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}_c_back" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}1", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}1" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
             plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.25, min_cluster_size=5, connectivity=1, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}2", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}2" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.3, min_cluster_size=5, connectivity=1, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}3", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}3" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.4, min_cluster_size=5, connectivity=1, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}3b", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}3b" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.15, min_cluster_size=5, connectivity=2, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}4", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}4" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=5, connectivity=2, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}5", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}5" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.25, min_cluster_size=5, connectivity=2, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}6", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}6" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.3, min_cluster_size=5, connectivity=2, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}7", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}7" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.4, min_cluster_size=5, connectivity=2, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}7b", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}7b" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.15, min_cluster_size=5, connectivity=3, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}8", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}8" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=5, connectivity=3, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}9", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}9" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.25, min_cluster_size=5, connectivity=3, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}10", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}10" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.3, min_cluster_size=5, connectivity=3, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}11", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}11" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.4, min_cluster_size=5, connectivity=3, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}11b", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}11b" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.15, min_cluster_size=5, connectivity=1, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}12", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}12" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=5, connectivity=1, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}13", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}13" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.25, min_cluster_size=5, connectivity=1, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}14", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}14" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.3, min_cluster_size=5, connectivity=1, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}15", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}15" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.4, min_cluster_size=5, connectivity=1, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}15b", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}15b" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.15, min_cluster_size=5, connectivity=2, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}16", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}16" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=5, connectivity=2, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}17", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}17" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.25, min_cluster_size=5, connectivity=2, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}18", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}18" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.3, min_cluster_size=5, connectivity=2, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}19", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}19" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.4, min_cluster_size=5, connectivity=2, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}19b", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}19b" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.15, min_cluster_size=5, connectivity=3, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}20", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}20" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=5, connectivity=3, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}21", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}21" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.25, min_cluster_size=5, connectivity=3, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}22", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}22" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.3, min_cluster_size=5, connectivity=3, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}23", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}23" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.4, min_cluster_size=5, connectivity=3, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}23b", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}23b" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.15, min_cluster_size=5, connectivity=4, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}24", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}24" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=5, connectivity=4, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}25", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}25" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.25, min_cluster_size=5, connectivity=4, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}26", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}26" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.3, min_cluster_size=5, connectivity=4, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}27", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}27" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.4, min_cluster_size=5, connectivity=4, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            plt.figure(figsize=(10, 6))
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+            plt.title("No2 enhancement with detected plume pixels")
+            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}27b", exist_ok=True)
+            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}27b" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+            plt.close('all')
+        #ds_plume = xr.open_dataset(plume_file)
+        #plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
+        #if plume_found:
+        #    mask = detect_plume_ztest(ds_plume["no2_enhancement_c_back"].values, p_threshold=0.35, min_cluster_size=20, connectivity=2, kernel_arm = 2, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+        #    plt.figure(figsize=(10, 6))
+        #    plt.imshow(ds_plume["no2_enhancement_c_back"].values, origin="lower", aspect="auto", cmap="viridis")
+        #    plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+        #    plt.title("No2 enhancement with detected plume pixels")
+        #    os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}_c_back", exist_ok=True)
+        #    plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}_c_back" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
+        #    plt.close('all')
 
     except Exception as e:
         print(f"Could not open plume file {plume_file}: {e}")
