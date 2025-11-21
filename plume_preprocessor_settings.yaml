@@ -9,7 +9,7 @@ Instruments: #relative to base_paths
   IMPACT_SC_file_ending: "ID.NO2_VIS_fix_ref_250907"
   do_reference_correction: true
   SC_reference_offset_correction_files: "_D.NO2_VIS_fix_ref_250907"
-  lp_doas_dir: "Open_Path"
+  lp_doas_dir: "Open_Path/SpectralAnalysis/results"
   in_situ_path: "InSitu"
   ais_dir: "AIS"
   img_dir: "video" # directory containing daily zipped video files

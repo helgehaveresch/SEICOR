@@ -37,6 +37,9 @@ with open(SETTINGS_PATH, "r") as file:
 
 BASEPATH                = Path(settings.get("base_paths", {}).get(_plat_key))
 date                    = settings["date"]
+#if an argument is passed to the script, use that as date
+if len(sys.argv) > 1:
+    date = sys.argv[1]
 instrument_settings     = settings["Instruments"]
 processing_settings     = settings["processing"]
 IMPACT_path             = (BASEPATH / instrument_settings["IMPACT_SC_path"] / get_month_folder(date))
@@ -107,7 +110,8 @@ import pandas as pd
 def plot_reference_image_with_plume_mask(ds_plume, out_dir, date, p_threshold=0.2, min_cluster_size = 0.2):
     ref_image = ds_plume["no2_ref"] - ds_plume["no2_ref"].mean(dim="window_ref")
     mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=p_threshold, min_cluster_size=min_cluster_size)
-    plt.imshow(ref_image.values, origin="lower", cmap="viridis")
+    plt.imshow(ref_image.values, origin="lower", aspect="auto", cmap="viridis")
+    plt.colorbar()
     plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
     plt.title("Reference image with detected plume pixels")
     if mask.sum() > 0:
@@ -142,7 +146,8 @@ for idx, row in ship_passes.iterrows():
         if plume_found:
             mask = SEICOR.plumes.detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=20)
             plt.figure(figsize=(10, 6))
-            plt.imshow(ds_plume["no2_enhancement_c_back"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.colorbar()
             plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
             plt.title("No2 enhancement with detected plume pixels")
             os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}", exist_ok=True)
@@ -152,9 +157,10 @@ for idx, row in ship_passes.iterrows():
         ds_plume = xr.open_dataset(plume_file)
         plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
         if plume_found:
-            mask = SEICOR.plumes.detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.2, min_cluster_size=20)
+            mask = SEICOR.plumes.detect_plume_ztest(ds_plume["no2_enhancement_c_back"].values, p_threshold=0.2, min_cluster_size=20)
             plt.figure(figsize=(10, 6))
             plt.imshow(ds_plume["no2_enhancement_c_back"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.colorbar()
             plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
             plt.title("No2 enhancement with detected plume pixels")
             os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}_c_back", exist_ok=True)
