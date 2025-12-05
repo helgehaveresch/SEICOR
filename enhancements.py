@@ -12,17 +12,26 @@ def rolling_background_enh(ds, window_size=500):
     ds["O4_rolling_background"] = ds["a[O4]"].rolling(dim_0=window_size).mean()
     return ds
 
-def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passes, window_minutes=(1, 3), ref_search_minutes=60, ref_window_minutes=1,  do_lp=False, df_lp = None):
+def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passes,
+                                    window_minutes=(1, 3), ref_search_minutes=60,
+                                    ref_window_minutes=1, ref_min_span_seconds=30,
+                                    ref_min_count=3, do_lp=False, df_lp=None):
+    """Subtracts background for a single ship pass (row from ship_passes).
+
+    This variant enforces minimum quality for the chosen reference window: it must
+    contain at least `ref_min_count` measurements and cover at least
+    `ref_min_span_seconds` seconds.
     """
-    Subtracts background for a single ship pass (row from ship_passes).
-    Returns: dict with keys: mmsi, t, no2_data, times_window, window, window_ref, ref_found
-    """
+
     mmsi = row["MMSI"]
-    t = pd.to_datetime(row.name)#.tz_localize("UTC")
+    t = pd.to_datetime(row.name)
     time_diff = row["Closest_Impact_Measurement_Time_Diff"].total_seconds()
     if time_diff > 60:
         return None
-    window = ((measurement_times >= t - pd.Timedelta(minutes=window_minutes[0])) & (measurement_times < t + pd.Timedelta(minutes=window_minutes[1])))
+
+    window = ((measurement_times >= t - pd.Timedelta(minutes=window_minutes[0])) &
+              (measurement_times < t + pd.Timedelta(minutes=window_minutes[1])))
+
     # Find reference window
     ref_found = False
     ref_offset = 3
@@ -32,69 +41,91 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
         ref_end = t - pd.Timedelta(minutes=ref_offset - ref_window_minutes)
         window_ref = ((measurement_times >= ref_start) & (measurement_times < ref_end))
         ref_times = measurement_times[window_ref]
+
+        # check other ships
         other_ships_in_window = False
         for idx2, row2 in ship_passes.iterrows():
             if row2["MMSI"] == mmsi:
                 continue
-            other_t = pd.to_datetime(idx2).tz_localize("UTC") if pd.to_datetime(idx2).tzinfo is None else pd.to_datetime(idx2)
-            if any(abs((ref_times - other_t).total_seconds()) < 5*60):
+            other_t = pd.to_datetime(idx2)
+            if other_t.tzinfo is None:
+                other_t = other_t.tz_localize("UTC")
+            if any(abs((ref_times - other_t).total_seconds()) < 5 * 60):
                 other_ships_in_window = True
                 break
+
         if not other_ships_in_window and window_ref.sum() > 0:
+            # additional quality checks: minimum number of samples and timespan
+            n_ref = int(window_ref.sum())
+            try:
+                ref_times_dt = pd.to_datetime(ref_times)
+                if len(ref_times_dt) > 1:
+                    span_seconds = (ref_times_dt.max() - ref_times_dt.min()).total_seconds()
+                else:
+                    span_seconds = 0.0
+            except Exception:
+                span_seconds = 0.0
+
+            if n_ref < ref_min_count or span_seconds < float(ref_min_span_seconds):
+                ref_offset += 1
+                ref_quality_try_idx += 1
+                continue
+
             ref_image = ds_impact["a[NO2]"].isel(dim_0=window_ref) - ds_impact["a[NO2]"].isel(dim_0=window_ref).mean(dim="dim_0")
-            mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=20) #make sure no plume in ref
+            mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=20)
             if mask.sum() == 0:
                 ref_found = True
             else:
-                #print(f"Reference window contains enhancements. Try {ref_quality_try_idx}. Trying next window")
                 ref_offset += 1
                 ref_quality_try_idx += 1
         else:
             ref_offset += 1
+
     if not ref_found:
         print(f"No clean reference window found for MMSI {mmsi} at {t}")
         return None
+
     no2_enhancement = ds_impact["a[NO2]"].isel(dim_0=window) - ds_impact["a[NO2]"].isel(dim_0=window_ref).mean(dim="dim_0")
     vertically_integrated_no2 = no2_enhancement.sum(dim="viewing_direction")
     o4_enhancement = ds_impact["a[O4]"].isel(dim_0=window) - ds_impact["a[O4]"].isel(dim_0=window_ref).mean(dim="dim_0")
 
-    ds =xr.Dataset(
-            data_vars=dict(
-                no2=(["image_row", "window_plume"], ds_impact["a[NO2]"].isel(dim_0=window).values),
-                o4=(["image_row", "window_plume"], ds_impact["a[O4]"].isel(dim_0=window).values),
-                o3=(["image_row", "window_plume"], ds_impact["a[O3]"].isel(dim_0=window).values),
-                h2o=(["image_row", "window_plume"], ds_impact["a[H2O]"].isel(dim_0=window).values),
-                ring=(["image_row", "window_plume"], ds_impact["a[RING]"].isel(dim_0=window).values),
-                rms=(["image_row", "window_plume"], ds_impact["rms"].isel(dim_0=window).values),
-                no2_enhancement_c_back=(["image_row", "window_plume"], no2_enhancement.values),
-                o4_enhancement_c_back=(["image_row", "window_plume"], o4_enhancement.values),
-                vertically_integrated_no2_enhancement_c_back=(["window_plume"], vertically_integrated_no2.values),
-                times_plume=(["window_plume"], np.array(pd.to_datetime(measurement_times[window]), dtype='datetime64[ns]')),
-                no2_ref=(["image_row", "window_ref"], ds_impact["a[NO2]"].isel(dim_0=window_ref).values),
-                o4_ref=(["image_row", "window_ref"], ds_impact["a[O4]"].isel(dim_0=window_ref).values),
-                times_ref=(["window_ref"], np.array(pd.to_datetime(measurement_times[window_ref]), dtype='datetime64[ns]')),
-                vea=(["image_row"], ds_impact.los[:,0].values),
-                vaa=(["window"], ds_impact["viewing-azimuth-angle"].isel(viewing_direction=0).values),
-                no2_enhancement_rolling_back=(["image_row", "window_plume"], ds_impact["NO2_enhancement_rolling_back"].isel(dim_0=window).values),
-                o4_enhancement_rolling_back=(["image_row", "window_plume"], ds_impact["O4_enhancement_rolling_back"].isel(dim_0=window).values),
-                no2_rolling_background=(["image_row", "window_plume"], ds_impact["NO2_rolling_background"].isel(dim_0=window).values),
-                o4_rolling_background=(["image_row", "window_plume"], ds_impact["O4_rolling_background"].isel(dim_0=window).values),
-                no2_rolling=(["image_row", "window_plume"], ds_impact["NO2_rolling"].isel(dim_0=window).values),
-                o4_rolling=(["image_row", "window_plume"], ds_impact["O4_rolling"].isel(dim_0=window).values),
+    ds = xr.Dataset(
+        data_vars=dict(
+            no2=(["image_row", "window_plume"], ds_impact["a[NO2]"].isel(dim_0=window).values),
+            o4=(["image_row", "window_plume"], ds_impact["a[O4]"].isel(dim_0=window).values),
+            o3=(["image_row", "window_plume"], ds_impact["a[O3]"].isel(dim_0=window).values),
+            h2o=(["image_row", "window_plume"], ds_impact["a[H2O]"].isel(dim_0=window).values),
+            ring=(["image_row", "window_plume"], ds_impact["a[RING]"].isel(dim_0=window).values),
+            rms=(["image_row", "window_plume"], ds_impact["rms"].isel(dim_0=window).values),
+            no2_enhancement_c_back=(["image_row", "window_plume"], no2_enhancement.values),
+            o4_enhancement_c_back=(["image_row", "window_plume"], o4_enhancement.values),
+            vertically_integrated_no2_enhancement_c_back=(["window_plume"], vertically_integrated_no2.values),
+            times_plume=(["window_plume"], np.array(pd.to_datetime(measurement_times[window]), dtype='datetime64[ns]')),
+            no2_ref=(["image_row", "window_ref"], ds_impact["a[NO2]"].isel(dim_0=window_ref).values),
+            o4_ref=(["image_row", "window_ref"], ds_impact["a[O4]"].isel(dim_0=window_ref).values),
+            times_ref=(["window_ref"], np.array(pd.to_datetime(measurement_times[window_ref]), dtype='datetime64[ns]')),
+            vea=(["image_row"], ds_impact.los[:, 0].values),
+            vaa=(["window"], ds_impact["viewing-azimuth-angle"].isel(viewing_direction=0).values),
+            no2_enhancement_rolling_back=(["image_row", "window_plume"], ds_impact["NO2_enhancement_rolling_back"].isel(dim_0=window).values),
+            o4_enhancement_rolling_back=(["image_row", "window_plume"], ds_impact["O4_enhancement_rolling_back"].isel(dim_0=window).values),
+            no2_rolling_background=(["image_row", "window_plume"], ds_impact["NO2_rolling_background"].isel(dim_0=window).values),
+            o4_rolling_background=(["image_row", "window_plume"], ds_impact["O4_rolling_background"].isel(dim_0=window).values),
+            no2_rolling=(["image_row", "window_plume"], ds_impact["NO2_rolling"].isel(dim_0=window).values),
+            o4_rolling=(["image_row", "window_plume"], ds_impact["O4_rolling"].isel(dim_0=window).values),
+        ),
+        coords=dict(
+            window_plume=ds_impact["dim_0"].isel(dim_0=window).values,
+            window_ref=ds_impact["dim_0"].isel(dim_0=window_ref).values,
+            image_row=ds_impact["viewing_direction"].values,
+        ),
+        attrs=dict(
+            mmsi=str(mmsi),
+            t=str(t),
+            plume_number=str(row["Plume_number"]),
+            ref_found=str(ref_found),
+        ),
+    )
 
-            ),
-            coords=dict(
-                window_plume=ds_impact["dim_0"].isel(dim_0=window).values,
-                window_ref=ds_impact["dim_0"].isel(dim_0=window_ref).values,
-                image_row=ds_impact["viewing_direction"].values,
-            ),
-            attrs=dict(
-                mmsi=str(mmsi),
-                t=str(t),
-                plume_number=str(row["Plume_number"]),
-                ref_found=str(ref_found)
-            )
-        )
     if df_lp is not None:
         lp_window = ((df_lp.index >= t - pd.Timedelta(minutes=window_minutes[0])) & (df_lp.index < t + pd.Timedelta(minutes=window_minutes[1])))
         lp_window_ref = ((df_lp.index >= ref_start) & (df_lp.index < ref_end))
@@ -106,23 +137,23 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
         lp_idx_window = lp_idx[lp_window]
         lp_idx_window_ref = lp_idx[lp_window_ref]
 
-        #add coord lp_window = np.where(lp_window)[0]
         ds = ds.assign_coords(
             lp_window=np.where(lp_window)[0],
-            lp_window_ref=np.where(lp_window_ref)[0]
+            lp_window_ref=np.where(lp_window_ref)[0],
         )
-        #add vars enhancement and time and background
+
         ds = ds.assign(
             lp_no2=(["lp_window"], df_lp['Fit Coefficient (NO2)'][lp_window].values),
             lp_rms=(["lp_window"], df_lp['RMS'][lp_window].values),
             lp_no2_enhancement=(["lp_window"], lp_no2_enhancement.values),
             lp_times_window=(["lp_window"], np.array(lp_idx_window, dtype="datetime64[ns]")),
             lp_no2_ref=(["lp_window_ref"], df_lp['Fit Coefficient (NO2)'][lp_window_ref].values),
-            lp_times_window_ref=(["lp_window_ref"], np.array(lp_idx_window_ref, dtype="datetime64[ns]"))
+            lp_times_window_ref=(["lp_window_ref"], np.array(lp_idx_window_ref, dtype="datetime64[ns]")),
         )
+
     return ds
 
-def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times, ship_passes, window_minutes=(1, 3), ref_search_minutes=60, ref_window_minutes=1,  do_lp=False, df_lp = None):
+def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times, ship_passes, window_minutes=(1, 3), ref_search_minutes=60, ref_window_minutes=1, ref_min_span_seconds=40, ref_min_count=100, do_lp=False, df_lp = None):
     """
     Subtracts background for a single ship pass (row from ship_passes).
     Returns: dict with keys: mmsi, t, no2_data, times_window, window, window_ref, ref_found
@@ -151,6 +182,22 @@ def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times,
                 other_ships_in_window = True
                 break
         if not other_ships_in_window and window_ref.sum() > 0:
+            # enforce minimum span and count for candidate upwind reference
+            n_ref = int(window_ref.sum())
+            try:
+                ref_times_dt = pd.to_datetime(ref_times)
+                if len(ref_times_dt) > 1:
+                    span_seconds = (ref_times_dt.max() - ref_times_dt.min()).total_seconds()
+                else:
+                    span_seconds = 0.0
+            except Exception:
+                span_seconds = 0.0
+
+            if n_ref < ref_min_count or span_seconds < float(ref_min_span_seconds):
+                ref_offset += 1
+                ref_quality_try_idx += 1
+                continue
+
             ref_image = ds_impact["a[NO2]"].isel(dim_0=window_ref) - ds_impact["a[NO2]"].isel(dim_0=window_ref).mean(dim="dim_0")
             mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=20) #make sure no plume in ref
             if mask.sum() == 0:
@@ -183,6 +230,22 @@ def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times,
                 other_ships_in_window = True
                 break
         if not other_ships_in_window and downwind_window_ref.sum() > 0:
+            # enforce minimum span and count for candidate downwind reference
+            n_down_ref = int(downwind_window_ref.sum())
+            try:
+                down_ref_times_dt = pd.to_datetime(downwind_ref_times)
+                if len(down_ref_times_dt) > 1:
+                    down_span_seconds = (down_ref_times_dt.max() - down_ref_times_dt.min()).total_seconds()
+                else:
+                    down_span_seconds = 0.0
+            except Exception:
+                down_span_seconds = 0.0
+
+            if n_down_ref < ref_min_count or down_span_seconds < float(ref_min_span_seconds):
+                ref_quality_try_idx += 1
+                downwind_ref_offset += 1
+                continue
+
             ref_image = ds_impact["a[NO2]"].isel(dim_0=downwind_window_ref) - ds_impact["a[NO2]"].isel(dim_0=downwind_window_ref).mean(dim="dim_0")
             mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=20) #make sure no plume in ref
             if mask.sum() == 0:
