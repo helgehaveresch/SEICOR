@@ -11,6 +11,7 @@ if _platform.startswith("win"):
     _default_scripts_dir = Path(r"C:\Users\hhave\Documents\Promotion\scripts")
     _default_settings_path = _default_scripts_dir / "SEICOR" / "plume_preprocessor_settings.yaml"
     _plat_key = "windows"
+    os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE" #enables concurrent reading of hdf5/netcdf files on windows network drives
 elif _platform.startswith("linux"):
     _default_scripts_dir = Path("/raid/home2/hhaveresch/scripts")
     _default_settings_path = _default_scripts_dir / "SEICOR" / "plume_preprocessor_settings.yaml"
@@ -19,6 +20,8 @@ elif _platform.startswith("linux"):
 SCRIPTS_DIR = Path("SCRIPTS_DIR", _default_scripts_dir)
 SETTINGS_PATH = Path("PLUME_SETTINGS_PATH", _default_settings_path)
 
+import netCDF4 #oder
+import xarray as xr
 sys.path.append(str(SCRIPTS_DIR))
 from doas_tools.file_handling import read_SC_file_imaging
 from imaging_tools.process_SC import mask_zenith, correct_destriped_for_noon_reference
