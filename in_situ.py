@@ -65,7 +65,6 @@ def read_in_situ(folder_path, date, filename=None):
     #    ds[short_name].attrs['long_name'] = orig_name
     #    ds[short_name].attrs['units'] = unit
 
-    print(f"Read and combined {len(file_paths)} files for {date}")
     return full_df
 
 def apply_time_mask_to_insitu(df, start_time, end_time):
