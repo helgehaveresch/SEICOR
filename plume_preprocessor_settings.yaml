@@ -1,7 +1,7 @@
-date: "250511"
+date: "250812"
 
 base_paths:
-  windows: "P:\\data\\SEICOR"
+  windows: "Q:\\BREDOM\\SEICOR"
   linux: "/misc/dodecagon/BREDOM/SEICOR"
 
 Instruments: #relative to base_paths
@@ -13,6 +13,7 @@ Instruments: #relative to base_paths
   in_situ_path: "InSitu"
   ais_dir: "AIS"
   img_dir: "video" # directory containing daily zipped video files
+  weather_stations_dir: "weatherstations"
   instrument_location:
     - 53.56958522848946
     - 9.69174249821205
