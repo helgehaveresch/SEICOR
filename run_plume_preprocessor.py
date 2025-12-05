@@ -2,11 +2,23 @@
 import subprocess
 import multiprocessing
 from pathlib import Path
+from datetime import datetime, timedelta
+import os
 
-date_list_orig = ['250417', '250418', '250421', '250423', '250430', '250520', '250522', '250524', '250527', '250604', '250712', '250812', '250824', '250905', ]
+def make_date_list(start_str='250326', end_str='250910'):
+    start = datetime.strptime(start_str, '%y%m%d').date()
+    end = datetime.strptime(end_str, '%y%m%d').date()
+    dates = []
+    cur = start
+    while cur <= end:
+        dates.append(cur.strftime('%y%m%d'))
+        cur += timedelta(days=1)
+    return dates
+
+date_list_orig = make_date_list('250326', '250910')
 
 def run_for_date(date):
-    print(f"[PID {Path('.').absolute()}] Running plume_preprocessor for date: {date}")
+    print(f"[PID {os.getpid()}] Running plume_preprocessor for date: {date}")
     try:
         cp = subprocess.run(
             ['python3', 'scripts/SEICOR/plume_preprocessor.py', date],
@@ -21,7 +33,7 @@ def run_for_date(date):
         return date, 1
 
 if __name__ == '__main__':
-    processes = len(date_list_orig)  # one worker per date
+    processes = 20
     with multiprocessing.Pool(processes=processes) as pool:
         try:
             results = pool.map(run_for_date, date_list_orig)
@@ -29,7 +41,6 @@ if __name__ == '__main__':
             pool.terminate()
             raise
 
-    # summary
     failed = [d for d, rc in results if rc != 0]
     if failed:
         print("The following dates failed:", failed)
