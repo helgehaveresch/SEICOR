@@ -171,6 +171,7 @@ def read_all_uni_hamburg_wind_data(dir_path, station_name, time, variab_list = [
     return df_final
 
 
+
 #%%
 
 finkenwerder_hourly = load_weather_data_csv(finkenwerder_path)
@@ -281,7 +282,116 @@ billwerder_hourly = calc_speed_dir_wind(billwerder_hourly,
                                         output_list_dir= ["wind_dir_50", "wind_dir_110", "wind_dir_175", "wind_dir_280"])
 #%%
 
-#select June only 
+
+cols = {
+    "finkenwerder_hourly": "wspd",
+    "mittelnkirchen_hourly": "wspd",
+    "york_hourly": "wspd",
+    "airpointer_hourly": "wind_speed",
+}
+
+ref_names = list(cols.keys())  # ["finkenwerder_hourly", "mittelnkirchen_hourly", "york_hourly", "airpointer_hourly"]
+aligned = {}
+for name in ref_names:
+    df = globals().get(name)
+    if df is None or df.empty:
+        print(f"Warning: DataFrame {name} not found or empty; skipping.")
+        continue
+    df2 = df.copy()
+    if "time" in df2.columns:
+        df2["time"] = pd.to_datetime(df2["time"], errors="coerce")
+        df2 = df2.set_index("time")
+    elif not pd.api.types.is_datetime64_any_dtype(df2.index):
+        # skip if no time info
+        continue
+    aligned[name] = df2
+
+# collect series for each variable across stations
+u_series = []
+v_series = []
+speed_series = []
+dir_series = []
+
+for name, df2 in aligned.items():
+    if "u_wind" in df2.columns:
+        u_series.append(df2["u_wind"].rename(name))
+    if "v_wind" in df2.columns:
+        v_series.append(df2["v_wind"].rename(name))
+
+    # speed: prefer 'wind_speed' then 'wspd' then station-specific speed cols
+    if "wind_speed" in df2.columns:
+        speed_series.append(df2["wind_speed"].rename(name))
+    elif "wspd" in df2.columns:
+        speed_series.append(df2["wspd"].rename(name))
+
+    # direction: prefer 'wind_dir' then 'wdir' then station-specific direction cols
+    if "wind_dir" in df2.columns:
+        dir_series.append(df2["wind_dir"].rename(name))
+    elif "wdir" in df2.columns:
+        dir_series.append(df2["wdir"].rename(name))
+
+# concat to aligned DataFrames (will align by time index)
+u_concat = pd.concat(u_series, axis=1) if u_series else pd.DataFrame()
+v_concat = pd.concat(v_series, axis=1) if v_series else pd.DataFrame()
+speed_concat = pd.concat(speed_series, axis=1) if speed_series else pd.DataFrame()
+dir_concat = pd.concat(dir_series, axis=1) if dir_series else pd.DataFrame()
+
+# median of reported u/v (direct median across stations)
+median_u = u_concat.median(axis=1, skipna=True).rename("median_u") if not u_concat.empty else pd.Series(dtype=float, name="median_u")
+median_v = v_concat.median(axis=1, skipna=True).rename("median_v") if not v_concat.empty else pd.Series(dtype=float, name="median_v")
+
+# median of reported speeds (direct median across stations)
+median_wspd = speed_concat.median(axis=1, skipna=True).rename("median_wspd") if not speed_concat.empty else pd.Series(dtype=float, name="median_wspd")
+
+# median wind direction from reported directions:
+# compute median of sin/cos components (robust circular aggregation)
+if not dir_concat.empty:
+    dir_rad = np.deg2rad(dir_concat)
+    sin_df = np.sin(dir_rad)
+    cos_df = np.cos(dir_rad)
+    median_sin = sin_df.median(axis=1, skipna=True)
+    median_cos = cos_df.median(axis=1, skipna=True)
+    median_wdir_direct = (np.rad2deg(np.arctan2(median_sin, median_cos)) + 360) % 360
+    median_wdir_direct = median_wdir_direct.rename("median_wdir")
+else:
+    median_wdir_direct = pd.Series(dtype=float, name="median_wdir")
+
+# assemble median DataFrame using the station medians (direct medians, not computed from u/v unless available)
+median_df = pd.concat(
+    [
+        median_u,                 # median of reported u_wind if available
+        median_v,                 # median of reported v_wind if available
+        median_wspd,     # median of reported speeds across stations
+        median_wdir_direct        # median direction computed from reported directions (circular)
+    ],
+    axis=1
+)
+median_df.index.name = "time"
+#save to csv
+median_df.to_csv(r"Q:\BREDOM\SEICOR\weatherstations\median_winddata_hourly.csv")
+
+# expose as median_hourly (reset index)
+median_hourly = median_df.reset_index()
+
+
+valid_times = median_df[median_df["median_wspd"] >= 2].index
+
+hourly_names = [
+    "finkenwerder_hourly", "fuhlsbuettel_hourly", "mittelnkirchen_hourly",
+    "york_hourly", "airpointer_hourly", "horiba_hourly", "rissen_hourly", "billwerder_hourly", "median_hourly"
+]
+
+for name in hourly_names:
+    df = globals().get(name)
+    if df is None or df.empty:
+        continue
+    if "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        globals()[name] = df[df["time"].isin(valid_times)].copy().reset_index(drop=True)
+    elif pd.api.types.is_datetime64_any_dtype(df.index):
+        globals()[name] = df.loc[df.index.isin(valid_times)].reset_index()
+
+
 finkenwerder_june = finkenwerder_hourly[finkenwerder_hourly['time'].dt.month == 6]
 fuhlsbuettel_june = fuhlsbuettel_hourly[fuhlsbuettel_hourly['time'].dt.month == 6]
 mittelnkirchen_june = mittelnkirchen_hourly[mittelnkirchen_hourly['time'].dt.month == 6]
@@ -290,16 +400,18 @@ airpointer_june = airpointer_hourly[airpointer_hourly['time'].dt.month == 6]
 horiba_june = horiba_hourly[horiba_hourly['time'].dt.month == 6]
 rissen_june = rissen_hourly[rissen_hourly['time'].dt.month == 6]
 billwerder_june = billwerder_hourly[billwerder_hourly['time'].dt.month == 6]
+median_june = median_hourly[median_hourly['time'].dt.month == 6]
 #%%
 plt.figure(figsize=(12, 6))
 plt.plot(finkenwerder_june['time'], finkenwerder_june['wspd'], label='Finkenwerder Airport')
 #plt.plot(fuhlsbuettel_june['time'], fuhlsbuettel_june['wspd'], label='Fuhlsbüttel Airport')
-#plt.plot(mittelnkirchen_june['time'], mittelnkirchen_june['wspd'], label='Mittelnkirchen-Hohenfelde')
+plt.plot(mittelnkirchen_june['time'], mittelnkirchen_june['wspd'], label='Mittelnkirchen-Hohenfelde')
 plt.plot(york_june['time'], york_june['wspd'], label='York-Moorende')
 plt.plot(airpointer_june['time'], airpointer_june['wind_speed'], label='Airpointer')
 #plt.plot(horiba_june['time'], horiba_june['wind_speed'], label='Horiba')
 #plt.plot(billwerder_june['time'], billwerder_june['wind_speed_50'], label='Billwerder 50m')
 #plt.plot(rissen_june['time'], rissen_june['wind_speed'], label='Rissen')
+plt.plot(median_june['time'], median_june['median_wspd'], label='Median', linestyle='--', color='black')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
@@ -315,12 +427,13 @@ plt.show()
 plt.figure(figsize=(12, 6))
 plt.plot(finkenwerder_june['time'], finkenwerder_june['wdir'], label='Finkenwerder Airport')
 #plt.plot(fuhlsbuettel_june['time'], fuhlsbuettel_june['wdir'], label='Fuhlsbüttel Airport')
-#plt.plot(mittelnkirchen_june['time'], mittelnkirchen_june['wdir'], label='Mittelnkirchen-Hohenfelde')
+plt.plot(mittelnkirchen_june['time'], mittelnkirchen_june['wdir'], label='Mittelnkirchen-Hohenfelde')
 plt.plot(york_june['time'], york_june['wdir'], label='York-Moorende')
 plt.plot(airpointer_june['time'], airpointer_june['wind_dir'], label='Airpointer')
 #plt.plot(horiba_june['time'], horiba_june['wind_dir'], label='Horiba')
 #plt.plot(billwerder_june['time'], billwerder_june['wind_dir_50'], label='Billwerder 50m')
 #plt.plot(rissen_june['time'], rissen_june['wind_dir'], label='Rissen')
+plt.plot(median_june['time'], median_june['median_wdir'], label='Median', linestyle='--', color='black')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
@@ -336,12 +449,13 @@ plt.show()
 plt.figure(figsize=(12, 6))
 plt.plot(finkenwerder_june['time'], finkenwerder_june['u_wind'], label='Finkenwerder Airport')
 #plt.plot(fuhlsbuettel_june['time'], fuhlsbuettel_june['u_wind'], label='Fuhlsbüttel Airport')
-#plt.plot(mittelnkirchen_june['time'], mittelnkirchen_june['u_wind'], label='Mittelnkirchen-Hohenfelde')
+plt.plot(mittelnkirchen_june['time'], mittelnkirchen_june['u_wind'], label='Mittelnkirchen-Hohenfelde')
 plt.plot(york_june['time'], york_june['u_wind'], label='York-Moorende')
 plt.plot(airpointer_june['time'], airpointer_june['u_wind'], label='Airpointer')
 #plt.plot(horiba_june['time'], horiba_june['u_wind'], label='Horiba')
 #plt.plot(rissen_june['time'], rissen_june['u_wind'], label='Rissen')
 #plt.plot(billwerder_june['time'], billwerder_june['u_wind_50'], label='Billwerder 50m')
+plt.plot(median_june['time'], median_june['median_u'], label='Median', linestyle='--', color='black')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
@@ -357,12 +471,13 @@ plt.show()
 plt.figure(figsize=(12, 6))
 plt.plot(finkenwerder_june['time'], finkenwerder_june['v_wind'], label='Finkenwerder Airport')
 #plt.plot(fuhlsbuettel_june['time'], fuhlsbuettel_june['v_wind'], label='Fuhlsbüttel Airport')
-#plt.plot(mittelnkirchen_june['time'], mittelnkirchen_june['v_wind'], label='Mittelnkirchen-Hohenfelde')
+plt.plot(mittelnkirchen_june['time'], mittelnkirchen_june['v_wind'], label='Mittelnkirchen-Hohenfelde')
 plt.plot(york_june['time'], york_june['v_wind'], label='York-Moorende')
 plt.plot(airpointer_june['time'], airpointer_june['v_wind'], label='Airpointer')
 #plt.plot(horiba_june['time'], horiba_june['v_wind'], label='Horiba')
 #plt.plot(rissen_june['time'], rissen_june['v_wind'], label='Rissen')
 #plt.plot(billwerder_june['time'], billwerder_june['v_wind_50'], label='Billwerder 50m')
+plt.plot(median_june['time'], median_june['median_v'], label='Median', linestyle='--', color='black')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
@@ -376,20 +491,41 @@ plt.show()
 
 # %%
 
-def plot_with_orthogonal_regression(x, y, xlabel, ylabel, max_1_1, one_to_one=True, xlim=None, ylim=None):
+def plot_with_orthogonal_regression(x, y, xlabel, ylabel, max_1_1, one_to_one=True, xlim=None, ylim=None,
+                                    color=None, color_label=None, cmap='viridis'):
     """
     Scatter plot with orthogonal (both-sided) linear regression (total least squares via PCA).
     x, y: pandas Series or numpy arrays
+    color: optional array/Series used to color the markers (shows a colorbar if provided)
+    color_label: label for the colorbar
     one_to_one: if True plot 1:1 dashed red line
     xlim, ylim: optional tuple to set axis limits
     """
     plt.figure(figsize=(6, 6))
-    plt.scatter(x, y, s=20, alpha=0.8)
 
-    # prepare numeric arrays and mask invalid values
+    # prepare numeric arrays and mask invalid values (also mask color)
     xarr = np.asarray(x)
     yarr = np.asarray(y)
     mask = np.isfinite(xarr) & np.isfinite(yarr)
+
+    colorarr = None
+    if color is not None:
+        colorarr = np.asarray(color)
+        # ensure colorarr has same shape and mask it
+        if colorarr.shape != xarr.shape:
+            # try to align via pandas index/values if Series passed
+            try:
+                colorarr = np.asarray(pd.Series(color).reindex_like(pd.Series(x)).values)
+            except Exception:
+                colorarr = None
+        if colorarr is not None:
+            colorarr = np.where(mask, colorarr, np.nan)
+
+    # scatter only masked points (avoid plotting NaNs)
+    if colorarr is None:
+        sc = plt.scatter(xarr[mask], yarr[mask], s=20, alpha=0.8)
+    else:
+        sc = plt.scatter(xarr[mask], yarr[mask], c=colorarr[mask], cmap=cmap, s=28, edgecolor='k', linewidth=0.1)
 
     slope = intercept = r = np.nan
     if mask.sum() >= 2:
@@ -433,6 +569,15 @@ def plot_with_orthogonal_regression(x, y, xlabel, ylabel, max_1_1, one_to_one=Tr
                 xmin -= pad; xmax += pad
         plt.plot([0, max_1_1], [0, max_1_1], 'r--', label='1:1 Line')
 
+    # add colorbar if color provided
+    if colorarr is not None and np.isfinite(colorarr).any():
+        try:
+            cb = plt.colorbar(sc)
+            if color_label:
+                cb.set_label(color_label)
+        except Exception:
+            pass
+
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
     if xlim is not None:
@@ -449,106 +594,216 @@ def plot_with_orthogonal_regression(x, y, xlabel, ylabel, max_1_1, one_to_one=Tr
 finkenwerder_june_main = finkenwerder_june[finkenwerder_june['time'].dt.day < 25]
 york_june_main = york_june[york_june['time'].dt.day < 25]
 airpointer_june_main = airpointer_june[airpointer_june['time'].dt.day < 25]
-plot_with_orthogonal_regression(
-    airpointer_june_main['wind_speed'],
-    finkenwerder_june_main['wspd'],
-    'Wind Speed (m/s) Airpointer',
-    'Wind Speed (m/s) Finkenwerder Airport',
-    max_1_1=11
-)
-
-# %%
-finkenwerder_june_main = finkenwerder_june[finkenwerder_june['time'].dt.day < 25]
-york_june_main = york_june[york_june['time'].dt.day < 25]
-airpointer_june_main = airpointer_june[airpointer_june['time'].dt.day < 25]
-plot_with_orthogonal_regression(
-    airpointer_june_main['wind_speed'],
-    york_june_main['wspd'],
-    'Wind Speed (m/s) Airpointer',
-    'Wind Speed (m/s) York-Moorende',
-    max_1_1=11
-)
-# %%
-finkenwerder_june_main = finkenwerder_june[finkenwerder_june['time'].dt.day < 25]
-york_june_main = york_june[york_june['time'].dt.day < 25]
-airpointer_june_main = airpointer_june[airpointer_june['time'].dt.day < 25]
-plot_with_orthogonal_regression(
-    york_june_main['wspd'],
-    finkenwerder_june_main['wspd'],
-    'Wind Speed (m/s) York-Moorende',
-    'Wind Speed (m/s) Finkenwerder Airport',
-    max_1_1=11
-)
-
-# %%
-finkenwerder_june_main = finkenwerder_june[finkenwerder_june['time'].dt.day < 25]
-york_june_main = york_june[york_june['time'].dt.day < 25]
-airpointer_june_main = airpointer_june[airpointer_june['time'].dt.day < 25]
-plot_with_orthogonal_regression(
-    airpointer_june_main['wind_dir'],
-    finkenwerder_june_main['wdir'],
-    'Wind Direction (°) Airpointer',
-    'Wind Direction (°) Finkenwerder Airport',
-    max_1_1=360
-)
-# %%
-finkenwerder_june_main = finkenwerder_june[finkenwerder_june['time'].dt.day < 25]
-york_june_main = york_june[york_june['time'].dt.day < 25]
-airpointer_june_main = airpointer_june[airpointer_june['time'].dt.day < 25]
-plot_with_orthogonal_regression(
-    airpointer_june_main['wind_dir'],
-    york_june_main['wdir'],
-    'Wind Direction (°) Airpointer',
-    'Wind Direction (°) York-Moorende',
-    max_1_1=360
-)
-# %%
-finkenwerder_june_main = finkenwerder_june[finkenwerder_june['time'].dt.day < 25]
-york_june_main = york_june[york_june['time'].dt.day < 25]
-airpointer_june_main = airpointer_june[airpointer_june['time'].dt.day < 25]
-plot_with_orthogonal_regression(
-    york_june_main['wdir'],
-    finkenwerder_june_main['wdir'],
-    'Wind Direction (°) York-Moorende',
-    'Wind Direction (°) Finkenwerder Airport',
-    max_1_1=360
-)
+mittelnkirchen_june_main = mittelnkirchen_june[mittelnkirchen_june['time'].dt.day < 25]
+billwerder_june_main = billwerder_june[billwerder_june['time'].dt.day < 25]
+median_june_main = median_june[median_june['time'].dt.day < 25]
 #%%
-finkenwerder_june_main = finkenwerder_june[finkenwerder_june['time'].dt.day < 25]
-york_june_main = york_june[york_june['time'].dt.day < 25]
-airpointer_june_main = airpointer_june[airpointer_june['time'].dt.day < 25]
+plot_with_orthogonal_regression(
+    airpointer_june_main['wind_speed'],
+    finkenwerder_june_main['wspd'],
+    'Wind Speed (m/s) Airpointer',
+    'Wind Speed (m/s) Finkenwerder Airport',
+    max_1_1=11,
+    color=airpointer_june_main.get('wind_dir'),
+    color_label='Airpointer wind dir (°)'
+)
+
+plot_with_orthogonal_regression(
+    airpointer_june_main['wind_speed'],
+    mittelnkirchen_june_main['wspd'],
+    'Wind Speed (m/s) Airpointer',
+    'Wind Speed (m/s) Mittelnkirchen-Hohenfelde',
+    max_1_1=11,
+    color=airpointer_june_main.get('wind_dir'),
+    color_label='Airpointer wind dir (°)'
+)
+
+plot_with_orthogonal_regression(
+    finkenwerder_june_main['wspd'],
+    mittelnkirchen_june_main['wspd'],
+    'Wind Speed (m/s) Finkenwerder Airport',
+    'Wind Speed (m/s) Mittelnkirchen-Hohenfelde',
+    max_1_1=11,
+    color=finkenwerder_june_main.get('wdir'),
+    color_label='Finkenwerder wind dir (°)'
+)
+
+plot_with_orthogonal_regression(
+    york_june_main['wspd'],
+    mittelnkirchen_june_main['wspd'],
+    'Wind Speed (m/s) York-Moorende',
+    'Wind Speed (m/s) Mittelnkirchen-Hohenfelde',
+    max_1_1=11,
+    color=york_june_main.get('wdir'),
+    color_label='York wind dir (°)'
+)
+
+plot_with_orthogonal_regression(
+    airpointer_june_main['wind_speed'],
+    york_june_main['wspd'],
+    'Wind Speed (m/s) Airpointer',
+    'Wind Speed (m/s) York-Moorende',
+    max_1_1=11,
+    color=airpointer_june_main.get('wind_dir'),
+    color_label='Airpointer wind dir (°)'
+)
+
+plot_with_orthogonal_regression(
+    york_june_main['wspd'],
+    finkenwerder_june_main['wspd'],
+    'Wind Speed (m/s) York-Moorende',
+    'Wind Speed (m/s) Finkenwerder Airport',
+    max_1_1=11,
+    color=york_june_main.get('wdir'),
+    color_label='York wind dir (°)'
+)
+
+# direction plots -> color by wind speed of the X series (or provided series)
+plot_with_orthogonal_regression(
+    airpointer_june_main['wind_dir'],
+    finkenwerder_june_main['wdir'],
+    'Wind Direction (°) Airpointer',
+    'Wind Direction (°) Finkenwerder Airport',
+    max_1_1=360,
+    color=airpointer_june_main.get('wind_speed'),
+    color_label='Airpointer wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    airpointer_june_main['wind_dir'],
+    mittelnkirchen_june_main['wdir'],
+    'Wind Direction (°) Airpointer',
+    'Wind Direction (°) Mittelnkirchen-Hohenfelde',
+    max_1_1=360,
+    color=airpointer_june_main.get('wind_speed'),
+    color_label='Airpointer wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    finkenwerder_june_main['wdir'],
+    mittelnkirchen_june_main['wdir'],
+    'Wind Direction (°) Finkenwerder Airport',
+    'Wind Direction (°) Mittelnkirchen-Hohenfelde',
+    max_1_1=360,
+    color=finkenwerder_june_main.get('wspd'),
+    color_label='Finkenwerder wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    york_june_main['wdir'],
+    mittelnkirchen_june_main['wdir'],
+    'Wind Direction (°) York-Moorende',
+    'Wind Direction (°) Mittelnkirchen-Hohenfelde',
+    max_1_1=360,
+    color=york_june_main.get('wspd'),
+    color_label='York wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    airpointer_june_main['wind_dir'],
+    york_june_main['wdir'],
+    'Wind Direction (°) Airpointer',
+    'Wind Direction (°) York-Moorende',
+    max_1_1=360,
+    color=airpointer_june_main.get('wind_speed'),
+    color_label='Airpointer wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    york_june_main['wdir'],
+    finkenwerder_june_main['wdir'],
+    'Wind Direction (°) York-Moorende',
+    'Wind Direction (°) Finkenwerder Airport',
+    max_1_1=360,
+    color=york_june_main.get('wspd'),
+    color_label='York wind speed (m/s)'
+)
+
 plot_with_orthogonal_regression(
     billwerder_june['wind_dir_110'],
     finkenwerder_june['wdir'],
     'Wind Direction (°) Billwerder 110m',
     'Wind Direction (°) Finkenwerder Airport',
-    max_1_1=360
+    max_1_1=360,
+    color=billwerder_june.get('wind_speed_110'),
+    color_label='Billwerder 110m wind speed (m/s)'
 )
 
-# %%
-billwerder_june_main = billwerder_june[billwerder_june['time'].dt.day < 25]
 plot_with_orthogonal_regression(
     billwerder_june_main['wind_dir_110'],
     airpointer_june_main['wind_dir'],
     'Wind Direction (°) Billwerder 110m',
     'Wind Direction (°) Airpointer',
-    max_1_1=360
+    max_1_1=360,
+    color=billwerder_june_main.get('wind_speed_110'),
+    color_label='Billwerder 110m wind speed (m/s)'
 )
 
-# %%
 plot_with_orthogonal_regression(
     billwerder_june['wind_dir_110'],
     york_june['wdir'],
     'Wind Direction (°) Billwerder 110m',
     'Wind Direction (°) York-Moorende',
-    max_1_1=360
+    max_1_1=360,
+    color=billwerder_june.get('wind_speed_110'),
+    color_label='Billwerder 110m wind speed (m/s)'
 )
-# %%
+
+plot_with_orthogonal_regression(
+    billwerder_june_main['wind_dir_110'],
+    median_june_main['median_wdir'],
+    'Wind Direction (°) Billwerder 110m',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=billwerder_june_main.get('wind_speed_110'),
+    color_label='Billwerder 110m wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    airpointer_june_main['wind_dir'],
+    median_june_main['median_wdir'],
+    'Wind Direction (°) Airpointer',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=airpointer_june_main.get('wind_speed'),
+    color_label='Airpointer wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    york_june_main['wdir'],
+    median_june_main['median_wdir'],
+    'Wind Direction (°) York-Moorende',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=york_june_main.get('wspd'),
+    color_label='York wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    finkenwerder_june_main['wdir'],
+    median_june_main['median_wdir'],
+    'Wind Direction (°) Finkenwerder Airport',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=finkenwerder_june_main.get('wspd'),
+    color_label='Finkenwerder wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    mittelnkirchen_june_main['wdir'],
+    median_june_main['median_wdir'],
+    'Wind Direction (°) Mittelnkirchen-Hohenfelde',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=mittelnkirchen_june_main.get('wspd'),
+    color_label='Mittelnkirchen wind speed (m/s)'
+)
+
 
 # %%
 ranges = [(0.0, 10.0), (93.0, 273.0), (321.0, 360.0)]
 
-wd = billwerder_june_main['wind_dir_110']
+wd = median_june_main['median_wdir']
 
 # mask for values inside the specified ranges
 mask_in_ranges = np.zeros(len(wd), dtype=bool)
@@ -562,81 +817,151 @@ finkenwerder_june_main_filtered = finkenwerder_june_main[finkenwerder_june_main[
 york_june_main_filtered = york_june_main[york_june_main['time'].isin(billwerder_valid_times)].copy()
 airpointer_june_main_filtered = airpointer_june_main[airpointer_june_main['time'].isin(billwerder_valid_times)].copy()
 billwerder_june_main_filtered = billwerder_june_main.loc[billwerder_dir_mask].copy()
-
+median_june_main_filtered = median_june_main[median_june_main['time'].isin(billwerder_valid_times)].copy()
+mittelnkirchen_june_main_filtered = mittelnkirchen_june_main[mittelnkirchen_june_main['time'].isin(billwerder_valid_times)].copy()
 # %%
 plot_with_orthogonal_regression(
     airpointer_june_main_filtered['wind_speed'],
     finkenwerder_june_main_filtered['wspd'],
     'Wind Speed (m/s) Airpointer',
     'Wind Speed (m/s) Finkenwerder Airport',
-    max_1_1=11
+    max_1_1=11,
+    color=airpointer_june_main_filtered.get('wind_speed'),
+    color_label='Airpointer wind speed (m/s)'
 )
 
-# %%
 plot_with_orthogonal_regression(
     airpointer_june_main_filtered['wind_speed'],
     york_june_main_filtered['wspd'],
     'Wind Speed (m/s) Airpointer',
     'Wind Speed (m/s) York-Moorende',
-    max_1_1=11
+    max_1_1=11,
+    color=york_june_main_filtered.get('wspd'),
+    color_label='York wind speed (m/s)'
 )
-# %%
+
 plot_with_orthogonal_regression(
     york_june_main_filtered['wspd'],
     finkenwerder_june_main_filtered['wspd'],
     'Wind Speed (m/s) York-Moorende',
     'Wind Speed (m/s) Finkenwerder Airport',
-    max_1_1=11
+    max_1_1=11,
+    color=finkenwerder_june_main_filtered.get('wspd'),
+    color_label='Finkenwerder wind speed (m/s)'
 )
 
-# %%
 plot_with_orthogonal_regression(
     airpointer_june_main_filtered['wind_dir'],
     finkenwerder_june_main_filtered['wdir'],
     'Wind Direction (°) Airpointer',
     'Wind Direction (°) Finkenwerder Airport',
-    max_1_1=360
+    max_1_1=360,
+    color=finkenwerder_june_main_filtered.get('wspd'),
+    color_label='Finkenwerder wind speed (m/s)'
 )
-# %%
+
 plot_with_orthogonal_regression(
     airpointer_june_main_filtered['wind_dir'],
     york_june_main_filtered['wdir'],
     'Wind Direction (°) Airpointer',
     'Wind Direction (°) York-Moorende',
-    max_1_1=360
+    max_1_1=360,
+    color=york_june_main_filtered.get('wspd'),
+    color_label='York wind speed (m/s)'
 )
-# %%
+
 plot_with_orthogonal_regression(
     york_june_main_filtered['wdir'],
     finkenwerder_june_main_filtered['wdir'],
     'Wind Direction (°) York-Moorende',
     'Wind Direction (°) Finkenwerder Airport',
-    max_1_1=360
+    max_1_1=360,
+    color=finkenwerder_june_main_filtered.get('wspd'),
+    color_label='Finkenwerder wind speed (m/s)'
 )
-#%%
 plot_with_orthogonal_regression(
     billwerder_june_main_filtered['wind_dir_110'],
     finkenwerder_june_main_filtered['wdir'],
     'Wind Direction (°) Billwerder 110m',
     'Wind Direction (°) Finkenwerder Airport',
-    max_1_1=360
+    max_1_1=360,
+    color=finkenwerder_june_main_filtered.get('wspd'),
+    color_label='Finkenwerder wind speed (m/s)'
 )
 
-# %%
+
 plot_with_orthogonal_regression(
     billwerder_june_main_filtered['wind_dir_110'],
     airpointer_june_main_filtered['wind_dir'],
     'Wind Direction (°) Billwerder 110m',
     'Wind Direction (°) Airpointer',
-    max_1_1=360
+    max_1_1=360,
+    color=airpointer_june_main_filtered.get('wind_speed'),
+    color_label='Airpointer wind speed (m/s)'
 )
 
-# %%
+
 plot_with_orthogonal_regression(
     billwerder_june_main_filtered['wind_dir_110'],
     york_june_main_filtered['wdir'],
     'Wind Direction (°) Billwerder 110m',
     'Wind Direction (°) York-Moorende',
-    max_1_1=360
+    max_1_1=360,
+    color=york_june_main_filtered.get('wspd'),
+    color_label='York wind speed (m/s)'
 )
+
+plot_with_orthogonal_regression(
+    york_june_main_filtered['wdir'],
+    median_june_main_filtered['median_wdir'],
+    'Wind Direction (°) York-Moorende',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=york_june_main_filtered.get('wspd'),
+    color_label='York wind speed (m/s)'
+)
+
+
+plot_with_orthogonal_regression(
+    mittelnkirchen_june_main_filtered['wdir'],
+    median_june_main_filtered['median_wdir'],
+    'Wind Direction (°) Mittelnkirchen-Hohenfelde',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=mittelnkirchen_june_main_filtered.get('wspd'),
+    color_label='Mittelnkirchen wind speed (m/s)'
+)
+
+
+plot_with_orthogonal_regression(
+    finkenwerder_june_main_filtered['wdir'],
+    median_june_main_filtered['median_wdir'],
+    'Wind Direction (°) Finkenwerder Airport',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=finkenwerder_june_main_filtered.get('wspd'),
+    color_label='Finkenwerder wind speed (m/s)'
+)
+
+plot_with_orthogonal_regression(
+    billwerder_june_main_filtered['wind_dir_110'],
+    median_june_main_filtered['median_wdir'],
+    'Wind Direction (°) Billwerder 110m',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=median_june_main_filtered.get('median_wspd'),
+    color_label='Median wind speed (m/s)'
+)
+
+
+plot_with_orthogonal_regression(
+    airpointer_june_main_filtered['wind_dir'],
+    median_june_main_filtered['median_wdir'],
+    'Wind Direction (°) Airpointer',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color=median_june_main_filtered.get('median_wspd'),
+    color_label='Median wind speed (m/s)'
+)
+
 # %%
