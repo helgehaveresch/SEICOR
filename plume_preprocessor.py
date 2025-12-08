@@ -5,6 +5,7 @@ import yaml
 import os
 import sys
 import platform
+import traceback
 from pathlib import Path
 
 _platform = platform.system().lower()  
@@ -42,8 +43,8 @@ with open(SETTINGS_PATH, "r") as file:
 BASEPATH                = Path(settings.get("base_paths", {}).get(_plat_key))
 date                    = settings["date"]
 #if an argument is passed to the script, use that as date
-#if len(sys.argv) > 1:
-#    date = sys.argv[1]
+if len(sys.argv) > 1:
+    date = sys.argv[1]
 instrument_settings     = settings["Instruments"]
 processing_settings     = settings["processing"]
 IMPACT_path             = (BASEPATH / instrument_settings["IMPACT_SC_path"] / get_month_folder(date))
@@ -79,21 +80,35 @@ endpoints_los = SEICOR.impact.calculate_LOS(ds_impact, instrument_location)
 lat2, lon2 = endpoints_los[:, 0], endpoints_los[:, 1] #todo: to be replaced 
 start_time, end_time, measurement_times = SEICOR.impact.calc_start_end_times(ds_impact)
 #%% Initialize in-situ data
-df_insitu = SEICOR.in_situ.read_in_situ(in_situ_path, date)
-df_insitu = SEICOR.in_situ.apply_time_mask_to_insitu(df_insitu, start_time, end_time)
-ds_impact = SEICOR.impact.calculate_path_averaged_vmr_no2(df_insitu, ds_impact)
+try:
+    df_insitu = SEICOR.in_situ.read_in_situ(in_situ_path, date)
+    df_insitu = SEICOR.in_situ.apply_time_mask_to_insitu(df_insitu, start_time, end_time)
+    ds_impact = SEICOR.impact.calculate_path_averaged_vmr_no2(df_insitu, ds_impact)
+except Exception as e:
+    print("Error in in-situ processing block:", e)
+    traceback.print_exc()
+    df_insitu = None
 #%% Initialize lp-doas data
-df_lp_doas = SEICOR.lp_doas.read_lpdoas(lp_doas_dir, date)
-df_lp_doas = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
-df_lp_doas_SC = SEICOR.lp_doas.read_lpdoas(lp_doas_dir, date, mode="SC")
-df_lp_doas_SC = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas_SC, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
+try:
+    df_lp_doas = SEICOR.lp_doas.read_lpdoas(lp_doas_dir, date)
+    df_lp_doas = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
+    df_lp_doas_SC = SEICOR.lp_doas.read_lpdoas(lp_doas_dir, date, mode="SC")
+    df_lp_doas_SC = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas_SC, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
 
-mask, ds_impact_masked = SEICOR.impact.mask_rms_and_reduce_impact(ds_impact, rms_threshold=processing_settings["quality"]["min_rms_IMPACT"])
-ds_impact_masked = SEICOR.enhancements.polynomial_background_enh(ds_impact_masked, degree=enhancement_settings["polynomial_background_degree"])
-ds_impact_masked = SEICOR.enhancements.fft_background_enh(ds_impact_masked, t_cut=enhancement_settings["high_pass_filter_time_period"])
-df_lp_doas_SC = SEICOR.enhancements.polynomial_background_enh_lp_doas(df_lp_doas_SC, degree=enhancement_settings["polynomial_background_degree"])
-df_lp_doas_SC = SEICOR.enhancements.fft_background_enh_lp_doas(df_lp_doas_SC, t_cut=enhancement_settings["high_pass_filter_time_period"])
-
+    mask, ds_impact_masked = SEICOR.impact.mask_rms_and_reduce_impact(ds_impact, rms_threshold=processing_settings["quality"]["min_rms_IMPACT"])
+    ds_impact_masked = SEICOR.enhancements.polynomial_background_enh(ds_impact_masked, degree=enhancement_settings["polynomial_background_degree"])
+    ds_impact_masked = SEICOR.enhancements.fft_background_enh(ds_impact_masked, t_cut=enhancement_settings["high_pass_filter_time_period"])
+    df_lp_doas_SC = SEICOR.enhancements.polynomial_background_enh_lp_doas(df_lp_doas_SC, degree=enhancement_settings["polynomial_background_degree"])
+    df_lp_doas_SC = SEICOR.enhancements.fft_background_enh_lp_doas(df_lp_doas_SC, t_cut=enhancement_settings["high_pass_filter_time_period"])
+except Exception as e:
+    print("Error in LP-DOAS / IMPACT processing block:", e)
+    traceback.print_exc()
+    # Fallbacks so downstream cells can still run. Adjust these as needed.
+    df_lp_doas = None
+    df_lp_doas_SC = None
+    mask = None
+    # keep ds_impact available if it exists, otherwise None
+    ds_impact_masked = ds_impact if 'ds_impact' in locals() else None
 #%% Initialize ais data
 df_ais = SEICOR.ais.prepare_ais(ais_dir, date, interpolation_limit = ais_settings["interpolation_limit"])
 df_ais, ship_groups, filtered_ship_groups = SEICOR.ais.pre_filter_ais(df_ais, lat_lon_window, start_time, end_time, length=ais_settings["max_ship_length"])
