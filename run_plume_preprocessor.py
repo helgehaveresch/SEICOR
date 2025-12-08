@@ -33,7 +33,7 @@ def run_for_date(date):
         return date, 1
 
 if __name__ == '__main__':
-    processes = 20
+    processes = 15
     with multiprocessing.Pool(processes=processes) as pool:
         try:
             results = pool.map(run_for_date, date_list_orig)
