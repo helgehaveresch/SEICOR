@@ -726,68 +726,69 @@ if settings["Plotting"]["generate_plots"]:
         out_dir=out_dir)
 
 # %%
-#import xarray as xr 
-#import pandas as pd
-#import shutil
-##load median wind dataset
-#median_wind_file = weather_stations_dir / f"Median_winddata" / f"median_winddata_hourly.csv"
-#df_median_wind = pd.read_csv(median_wind_file, parse_dates=["time"])
-#
-## find best matching column names for direction and speed
-#dir_candidates = ["median_wdir", "median_wind_dir", "wind_dir", "wdir", "direction"]
-#speed_candidates = ["median_wspd", "median_wspd_reported", "median_speed_uv", "median_wind_speed", "wind_speed", "wspd"]
-#
-## define angular ranges (degrees)
-#r1_lo, r1_hi = 273.2, 293.2
-#r2_lo, r2_hi =  93.2, 113.2
-#
-## build masks: direction in either range AND speed > 2 m/s
-#dir_vals = df_median_wind["median_wdir"]
-#speed_vals = df_median_wind["median_wspd"]
-#
-#mask_dir = dir_vals.between(r1_lo, r1_hi) | dir_vals.between(r2_lo, r2_hi)
-#mask_speed = speed_vals > 2.0
-#
-#median_keep_mask = mask_dir & mask_speed & dir_vals.notna() & speed_vals.notna()
-#
-## filtered dataframe and list of valid times
-#df_median_wind_filtered = df_median_wind.loc[median_keep_mask].copy().reset_index(drop=True)
-#valid_median_times = pd.to_datetime(df_median_wind_filtered["time"]) if "time" in df_median_wind_filtered.columns else df_median_wind_filtered.index
-#
-## expose filtered objects for downstream use
-#df_median_wind = df_median_wind  # keep original
-#df_median_wind_kept = df_median_wind_filtered
-#valid_median_times = valid_median_times
-#
-#df_all_ship_passes = pd.read_csv(ship_passes_out_dir / f"all_ship_passes.csv", parse_dates=["UTC_Time", "Closest_Impact_Measurement_Time" ]).set_index("UTC_Time")
-## %%
-#valid_hour_keys = set(valid_median_times.dt.strftime("%Y-%m-%d %H"))
-#hour_keys = pd.Series(df_all_ship_passes.index.strftime("%Y-%m-%d %H"), index=df_all_ship_passes.index)
-#df_all_ship_passes_mask = hour_keys.isin(valid_hour_keys)
-#df_all_ship_passes_filtered = df_all_ship_passes.loc[df_all_ship_passes_mask].copy()
-#df_all_ship_passes_filtered.sort_index(inplace=True)
-# %%
-#for idx, ship_pass in df_all_ship_passes_filtered.iterrows():
-#    try:
-#        stored = ship_pass.get("plume_file", None)
-#        fn = Path(stored).name
-#        date = ship_pass['Closest_Impact_Measurement_Time'].strftime('%y%m%d')
-#        out_dir = Path(f"E:\\plumes\\plumes_{date}")
-#        plume_file = out_dir / fn
-#        ds_plume = xr.open_dataset(plume_file)
-#        plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
-#        if plume_found:
-#            #copy the respective plume_detection_file to a separate folder for further analysis
-#            image_path = Path(f"Q:\\BREDOM\\SEICOR\\analysis\\plume_detection\\plumes_{date}\\ship_yes")
-#            fn = f"plume_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_ship.png"
-#            original_image_path = image_path / fn
-#            dst_path = Path(r"Q:\BREDOM\SEICOR\analysis\wind_filtered_plots")
-#            shutil.copy(original_image_path, dst_path / fn)
-#            pass
-#        elif not plume_found:
-#            print("no plume found")
-#    except Exception as e:
-#        pass
-#        print(f"Could not open plume file {plume_file}: {e}")
-# %%
+import xarray as xr 
+import pandas as pd
+import shutil
+#load median wind dataset
+median_wind_file = weather_stations_dir / f"Median_winddata" / f"median_winddata_hourly.csv"
+df_median_wind = pd.read_csv(median_wind_file, parse_dates=["time"])
 
+# find best matching column names for direction and speed
+dir_candidates = ["median_wdir", "median_wind_dir", "wind_dir", "wdir", "direction"]
+speed_candidates = ["median_wspd", "median_wspd_reported", "median_speed_uv", "median_wind_speed", "wind_speed", "wspd"]
+
+# define angular ranges (degrees)
+r1_lo, r1_hi = 273.2, 293.2
+r2_lo, r2_hi =  93.2, 113.2
+
+# build masks: direction in either range AND speed > 2 m/s
+dir_vals = df_median_wind["median_wdir"]
+speed_vals = df_median_wind["median_wspd"]
+
+mask_dir = dir_vals.between(r1_lo, r1_hi) | dir_vals.between(r2_lo, r2_hi)
+mask_speed = speed_vals > 2.0
+
+median_keep_mask = mask_dir & mask_speed & dir_vals.notna() & speed_vals.notna()
+
+# filtered dataframe and list of valid times
+df_median_wind_filtered = df_median_wind.loc[median_keep_mask].copy().reset_index(drop=True)
+valid_median_times = pd.to_datetime(df_median_wind_filtered["time"]) if "time" in df_median_wind_filtered.columns else df_median_wind_filtered.index
+
+# expose filtered objects for downstream use
+df_median_wind = df_median_wind  # keep original
+df_median_wind_kept = df_median_wind_filtered
+valid_median_times = valid_median_times
+
+df_all_ship_passes = pd.read_csv(ship_passes_out_dir / f"all_ship_passes.csv", parse_dates=["UTC_Time", "Closest_Impact_Measurement_Time" ]).set_index("UTC_Time")
+# %%
+valid_hour_keys = set(valid_median_times.dt.strftime("%Y-%m-%d %H"))
+hour_keys = pd.Series(df_all_ship_passes.index.strftime("%Y-%m-%d %H"), index=df_all_ship_passes.index)
+df_all_ship_passes_mask = hour_keys.isin(valid_hour_keys)
+df_all_ship_passes_filtered = df_all_ship_passes.loc[df_all_ship_passes_mask].copy()
+df_all_ship_passes_filtered.sort_index(inplace=True)
+# %%
+for idx, ship_pass in df_all_ship_passes_filtered.iterrows():
+    try:
+        stored = ship_pass.get("plume_file", None)
+        fn = Path(stored).name
+        date = ship_pass['Closest_Impact_Measurement_Time'].strftime('%y%m%d')
+        out_dir = Path(f"E:\\plumes\\plumes_{date}")
+        plume_file = out_dir / fn
+        ds_plume = xr.open_dataset(plume_file)
+        plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
+        if plume_found:
+            #copy the respective plume_detection_file to a separate folder for further analysis
+            image_path = Path(f"Q:\\BREDOM\\SEICOR\\analysis\\plume_detection\\plumes_{date}\\ship_yes")
+            fn = f"plume_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_ship.png"
+            original_image_path = image_path / fn
+            dst_path = Path(r"Q:\BREDOM\SEICOR\analysis\wind_filtered_plots")
+            shutil.copy(original_image_path, dst_path / fn)
+            pass
+        elif not plume_found:
+            print("no plume found")
+    except Exception as e:
+        pass
+        print(f"Could not open plume file {plume_file}: {e}")
+
+
+# %%
