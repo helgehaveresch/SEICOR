@@ -3,6 +3,7 @@ import os
 import shutil
 import re
 import zipfile
+import numpy as np
 
 def parse_img_time(fname):
     
@@ -83,10 +84,14 @@ def assign_video_images_to_ship_pass(df_closest, img_dir, date):
                 if parsed is not None:
                     imgs.append((m, parsed))
     else:
-        
-        if not os.path.isdir(dirpath):
-            raise FileNotFoundError(f"Image directory not found: {dirpath}")
         imgs = []
+        # If directory does not exist, do not abort — mark rows as having no image
+        if not os.path.isdir(dirpath):
+            df_out = df_closest.copy()
+            df_out["closest_image_file"] = "no image"
+            df_out["image_time_diff"] = np.nan
+            return df_out
+
         for f in os.listdir(dirpath):
             if f.lower().endswith(".jpg"):
                 parsed = parse_img_time(f)
@@ -94,18 +99,30 @@ def assign_video_images_to_ship_pass(df_closest, img_dir, date):
                     imgs.append((f, parsed))
 
     if not imgs:
-        # no valid images found; return df unchanged (but copy to avoid side-effects)
-        return df_closest.copy()
+        # no valid images found; mark all rows as having no image and return
+        df_out = df_closest.copy()
+        df_out["closest_image_file"] = "no image"
+        df_out["image_time_diff"] = np.nan
+        return df_out
 
     img_files, img_times = zip(*imgs)
 
     closest_files = []
     time_diffs = []
     for t in df_closest.index:
-        closest_file, time_diff = get_closest_image(img_files, img_times, t)
-        # store the archive member path (for zip) or the filename (for dir)
-        closest_files.append(os.path.join(dirpath,closest_file))
-        time_diffs.append(time_diff)
+        try:
+            closest_file, time_diff = get_closest_image(img_files, img_times, t)
+            # store the archive member path (for zip) or the full filepath (for dir)
+            if is_zip:
+                # keep zip member path as stored value
+                closest_files.append(closest_file)
+            else:
+                closest_files.append(os.path.join(dirpath, closest_file))
+            time_diffs.append(time_diff)
+        except Exception:
+            # could not find/parse a closest image for this timestamp
+            closest_files.append("no image")
+            time_diffs.append(np.nan)
 
     df_closest = df_closest.copy()
     df_closest["closest_image_file"] = closest_files
@@ -125,37 +142,58 @@ def copy_ship_images(df_closest, img_dir, date, img_out_dir, time_threshold=30):
     is_zip = os.path.isfile(zip_dirpath) and zipfile.is_zipfile(zip_dirpath)
 
     if is_zip:
-        with zipfile.ZipFile(img_dir, "r") as zf:
+        with zipfile.ZipFile(zip_dirpath, "r") as zf:
             for ship_time, ship in df_closest.iterrows():
                 mmsi = ship["MMSI"]
-                closest_file = ship["closest_image_file"]  # this is the member path in zip
+                closest_file = ship["closest_image_file"]  # this is the member path in zip or 'no image'
                 time_diff = ship["image_time_diff"]
-                if time_diff <= time_threshold:
-                    base = os.path.basename(closest_file)
-                    name_base, ext = os.path.splitext(base)
-                    new_name = f"{name_base}_{mmsi}{ext}"
-                    dst = os.path.join(img_out_dir, new_name)
-                    try:
-                        with zf.open(closest_file) as srcf, open(dst, "wb") as dstf:
-                            shutil.copyfileobj(srcf, dstf)
-                    except KeyError:
-                        print(f"Image {closest_file} not found inside zip archive {img_dir}")
-                else:
-                    print(f"No suitable image found for MMSI {mmsi} at time {ship_time}, closest image was {closest_file} with time difference {time_diff:.2f} seconds")
+
+                # skip if marked 'no image' or time diff not numeric or too large
+                if closest_file == "no image" or not (isinstance(time_diff, (int, float)) and time_diff <= time_threshold):
+                    print(f"No suitable image found for MMSI {mmsi} at time {ship_time}, closest image was {closest_file} with time difference {time_diff}")
+                    df_closest.at[ship_time, "closest_image_file"] = "no image"
+                    continue
+
+                base = os.path.basename(closest_file)
+                name_base, ext = os.path.splitext(base)
+                new_name = f"{name_base}_{mmsi}{ext}"
+                dst = os.path.join(img_out_dir, new_name)
+                try:
+                    with zf.open(closest_file) as srcf, open(dst, "wb") as dstf:
+                        shutil.copyfileobj(srcf, dstf)
+                except KeyError:
+                    print(f"Image {closest_file} not found inside zip archive {zip_dirpath}")
+                    df_closest.at[ship_time, "closest_image_file"] = "no image"
+                except Exception as e:
+                    print(f"Error extracting {closest_file} from {zip_dirpath}: {e}")
+                    df_closest.at[ship_time, "closest_image_file"] = "no image"
     else:
         for ship_time, ship in df_closest.iterrows():
             mmsi = ship["MMSI"]
             closest_file = ship["closest_image_file"]
             time_diff = ship["image_time_diff"]
-            if time_diff <= time_threshold:
-                src = closest_file if os.path.isabs(closest_file) else os.path.join(img_dir, "{}_video".format(ship_time.date().strftime("%y%m%d") if False else ""))  # placeholder, keep previous behavior below
-                # previous behavior: src = closest_file if abs else os.path.join(img_dir, closest_file)
-                # use original simple join to maintain compatibility with how assign_video_images_to_ship_pass stores filenames
-                src = closest_file if os.path.isabs(closest_file) else os.path.join(img_dir, closest_file)
-                base, ext = os.path.splitext(os.path.basename(closest_file))
-                new_name = f"{base}_{mmsi}.jpg"
-                dst = os.path.join(img_out_dir, new_name)
-                shutil.copy2(src, dst)
+            # skip if no image marked or time diff invalid or too large
+            if closest_file == "no image" or not (isinstance(time_diff, (int, float)) and time_diff <= time_threshold):
+                print(f"No suitable image found for MMSI {mmsi} at time {ship_time}, closest image was {closest_file} with time difference {time_diff}")
+                df_closest.at[ship_time, "closest_image_file"] = "no image"
+                continue
+
+            # determine source path: absolute path or path inside dirpath
+            if os.path.isabs(closest_file) and os.path.exists(closest_file):
+                src = closest_file
             else:
-                print(f"No suitable image found for MMSI {mmsi} at time {ship_time}, closest image was {closest_file} with time difference {time_diff:.2f} seconds")
+                src = os.path.join(dirpath, os.path.basename(closest_file))
+
+            base, ext = os.path.splitext(os.path.basename(closest_file))
+            new_name = f"{base}_{mmsi}.jpg"
+            dst = os.path.join(img_out_dir, new_name)
+            try:
+                shutil.copy2(src, dst)
+            except FileNotFoundError:
+                print(f"Source image not found: {src} (for MMSI {mmsi})")
+                df_closest.at[ship_time, "closest_image_file"] = "no image"
+            except Exception as e:
+                print(f"Error copying {src} to {dst}: {e}")
+                df_closest.at[ship_time, "closest_image_file"] = "no image"
     print("Copied Images of ships")
+    return df_closest
