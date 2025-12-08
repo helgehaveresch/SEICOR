@@ -630,9 +630,13 @@ def plot_ship_pass_subplot_v1(
     Plot NO2 enhancement, integrated NO2, video image, wind/ship polar, and in-situ NO2 for a ship pass.
     """
 
-    # Try to find the corresponding image
+    # Try to find the corresponding image (treat explicit 'no image' as missing)
     img_file = None
-    if "closest_image_file" in passing_ship and pd.notnull(passing_ship["closest_image_file"]):
+    if (
+        "closest_image_file" in passing_ship
+        and pd.notnull(passing_ship["closest_image_file"])
+        and str(passing_ship["closest_image_file"]).strip().lower() != "no image"
+    ):
         img_file = passing_ship["closest_image_file"]
     # Normalize and convert plume times to matplotlib date numbers to avoid
     # overflow when matplotlib converts numpy datetime64 or tz-aware timestamps.
@@ -853,8 +857,13 @@ def plot_ship_pass_subplot_v2(
         ds_plume, passing_ship, no2_out_dir, lat1, lon1, lat2, lon2, save=False
     ):
 
+    # Try to find the corresponding image (treat explicit 'no image' as missing)
     img_file = None
-    if "closest_image_file" in passing_ship and pd.notnull(passing_ship["closest_image_file"]):
+    if (
+        "closest_image_file" in passing_ship
+        and pd.notnull(passing_ship["closest_image_file"])
+        and str(passing_ship["closest_image_file"]).strip().lower() != "no image"
+    ):
         img_file = passing_ship["closest_image_file"]
     
     # Create subplot
@@ -1108,21 +1117,53 @@ def plot_ship_pass_subplot_v2(
     n_NO2_impact = impact_enh_rolling * 1e4 / (L * n_air_aligned) * 1e9
 
     # Convert LP-DOAS times to matplotlib date numbers for consistent plotting
-    try:
-        lp_times_dt = pd.to_datetime(ds_plume["lp_times_window"].values)
-    except Exception:
-        lp_times_dt = pd.to_datetime(ds_plume.get("lp_times_window", []))
-    if getattr(lp_times_dt, 'dt', None) is not None and lp_times_dt.dt.tz is not None:
-        lp_times_dt = lp_times_dt.dt.tz_convert('UTC').dt.tz_localize(None)
-    lp_times = pd.to_datetime(lp_times_dt).to_pydatetime()
-    if len(lp_times) > 0:
-        lp_times_num = mdates.date2num(lp_times)
-    else:
-        lp_times_num = np.array([])
+    lp_available = ("lp_times_window" in ds_plume) and ("lp_no2_enhancement" in ds_plume)
+    lp_times_num = np.array([])
 
+    if lp_available:
+        try:
+            lp_times_dt = pd.to_datetime(ds_plume["lp_times_window"].values)
+        except Exception:
+            lp_times_dt = pd.to_datetime(ds_plume.get("lp_times_window", []))
+
+        # If pandas Series / tz-aware, normalize to UTC-naive
+        try:
+            if getattr(lp_times_dt, 'dt', None) is not None and getattr(lp_times_dt.dt, 'tz', None) is not None:
+                lp_times_dt = lp_times_dt.dt.tz_convert('UTC').dt.tz_localize(None)
+        except Exception:
+            pass
+
+        lp_times = pd.to_datetime(lp_times_dt).to_pydatetime()
+        if len(lp_times) > 0:
+            lp_times_num = mdates.date2num(lp_times)
+        else:
+            lp_times_num = np.array([])
+
+    # Plot IMPACT (always)
     ax4.plot(times_num, n_NO2_impact, color='orange', label="IMPACT n$_{NO_2}$ [ppb] (rolling mean)")
-    ax4.plot(lp_times_num, ds_plume["lp_no2_enhancement"], color='tab:blue', label="LP-DOAS n$_{NO_2}$ [ppb]")
-    
+
+    # Plot LP-DOAS only if available and there are times
+    if lp_available and lp_times_num.size > 0:
+        try:
+            lp_vals = ds_plume["lp_no2_enhancement"].values
+        except Exception:
+            lp_vals = np.asarray(ds_plume.get("lp_no2_enhancement", []))
+
+        # If lengths match, plot directly; otherwise align by nearest length and warn
+        if lp_vals is None or len(lp_vals) == 0:
+            # nothing to plot
+            pass
+        else:
+            if len(lp_vals) == len(lp_times_num):
+                ax4.plot(lp_times_num, lp_vals, color='tab:blue', label="LP-DOAS n$_{NO_2}$ [ppb]")
+            else:
+                # Try to align by truncating the longer array (safe fallback)
+                L = min(len(lp_vals), len(lp_times_num))
+                ax4.plot(lp_times_num[:L], lp_vals[:L], color='tab:blue', label="LP-DOAS n$_{NO_2}$ [ppb]")
+                print(f"Warning: LP-DOAS times ({len(lp_times_num)}) and values ({len(lp_vals)}) lengths differ; plotting first {L} points.")
+    else:
+        # LP-DOAS not present — only IMPACT will be shown
+        pass
     #In-situ enhancement: subtract mean in reference window (for plotting, not converted)
     #if len(in_situ_times) > 0:
     #    in_situ_ref_mask = (ds_times >= times_window_naive[0] - pd.Timedelta(minutes=ref_offset)) & \
