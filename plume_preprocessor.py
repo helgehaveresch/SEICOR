@@ -664,81 +664,123 @@ for idx, row in ship_passes.iterrows():
 
 #%%
 if settings["Plotting"]["generate_plots"]:
-    SEICOR.plotting.plot_trajectories(
-        filtered_ship_groups, 
-        maskedout_groups, 
-        ship_passes, 
-        lon1, 
-        lon2, 
-        lat1, 
-        lat2, 
-        lat_lon_window_small, 
-        save=True, 
-        out_dir=out_dir)
-    
-    SEICOR.plotting.plot_maskedout_ships_details(
-        maskedout_groups, 
-        lat_lon_window_small, 
-        lon1, 
-        lon2, 
-        lat1, 
-        lat2, 
-        save=True, 
-        out_dir=out_dir)
-    
-    SEICOR.plotting.plot_ship_stats(
-        filtered_ship_groups, 
-        save=True, 
-        out_dir=out_dir)
 
-    SEICOR.plotting.plot_no2_timeseries(
-        ds_impact_masked, 
-        ship_passes, 
-        start_time, 
-        end_time, 
-        separate_legend=True, 
-        save=True, 
-        out_dir=out_dir)
+    def _safe_run(name, fn, *args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            print(f"Error running {name}: {e}")
+            traceback.print_exc()
 
-    SEICOR.plotting.plot_no2_enhancements_for_all_ships(
+    _safe_run(
+        "plot_trajectories",
+        SEICOR.plotting.plot_trajectories,
+        filtered_ship_groups,
+        maskedout_groups,
+        ship_passes,
+        lon1,
+        lon2,
+        lat1,
+        lat2,
+        lat_lon_window_small,
+        save=True,
+        out_dir=out_dir,
+    )
+
+    _safe_run(
+        "plot_maskedout_ships_details",
+        SEICOR.plotting.plot_maskedout_ships_details,
+        maskedout_groups,
+        lat_lon_window_small,
+        lon1,
+        lon2,
+        lat1,
+        lat2,
+        save=True,
+        out_dir=out_dir,
+    )
+
+    _safe_run(
+        "plot_ship_stats",
+        SEICOR.plotting.plot_ship_stats,
+        filtered_ship_groups,
+        save=True,
+        out_dir=out_dir,
+    )
+
+    _safe_run(
+        "plot_no2_timeseries",
+        SEICOR.plotting.plot_no2_timeseries,
+        ds_impact_masked,
+        ship_passes,
+        start_time,
+        end_time,
+        separate_legend=True,
+        save=True,
+        out_dir=out_dir,
+    )
+
+    _safe_run(
+        "plot_no2_enhancements_for_all_ships",
+        SEICOR.plotting.plot_no2_enhancements_for_all_ships,
         (ship_passes_out_dir / f"ship_passes_{date}.csv"),
-        (out_dir / f"no2plots" / "{}_no2plots".format(date)))
-    
-    SEICOR.plotting.plot_no2_enhancements_for_all_ships_full_overview(
-        (ship_passes_out_dir / f"ship_passes_{date}.csv"), 
-        (out_dir / f"no2plots_full_overview" / "{}_no2plots".format(date)), 
-        lat1, lon1, lat2, lon2, save=True)
-    
-    SEICOR.plotting.plot_wind_polar(
+        (out_dir / f"no2plots" / "{}_no2plots".format(date)),
+    )
+
+    _safe_run(
+        "plot_no2_enhancements_for_all_ships_full_overview",
+        SEICOR.plotting.plot_no2_enhancements_for_all_ships_full_overview,
+        (ship_passes_out_dir / f"ship_passes_{date}.csv"),
+        (out_dir / f"no2plots_full_overview" / "{}_no2plots".format(date)),
+        lat1,
+        lon1,
+        lat2,
+        lon2,
+        save=True,
+    )
+
+    _safe_run(
+        "plot_wind_polar",
+        SEICOR.plotting.plot_wind_polar,
         df_insitu,
-        save=True, 
-        out_dir=out_dir)
-    
-    SEICOR.plotting.plot_no2_enhancement_and_insitu(
+        save=True,
+        out_dir=out_dir,
+    )
+
+    _safe_run(
+        "plot_no2_enhancement_and_insitu",
+        SEICOR.plotting.plot_no2_enhancement_and_insitu,
         ds_impact,
         df_insitu,
         ship_passes,
-        save=True, 
-        out_dir=out_dir)
+        save=True,
+        out_dir=out_dir,
+    )
 
-    SEICOR.plotting.plot_all_instruments_timeseries_VMR(
+    _safe_run(
+        "plot_all_instruments_timeseries_VMR",
+        SEICOR.plotting.plot_all_instruments_timeseries_VMR,
         df_lp_doas,
         df_insitu,
         ds_impact,
         ds_impact["VMR_NO2"],
         df_closest=ship_passes,
         title=f"NO$_2$ measurements on {date}",
-        save=True, 
-        out_dir=out_dir)
-    
-    SEICOR.plotting.plot_all_instruments_timeseries_SC(
+        save=True,
+        out_dir=out_dir,
+    )
+
+    _safe_run(
+        "plot_all_instruments_timeseries_SC",
+        SEICOR.plotting.plot_all_instruments_timeseries_SC,
         df_lp_doas_SC,
         df_insitu,
         ds_impact,
         df_closest=ship_passes,
         title=f"NO$_2$ measurements on {date}",
-        save=True, 
-        out_dir=out_dir)
+        save=True,
+        out_dir=out_dir,
+    )
 
 # %%
 #import xarray as xr 
