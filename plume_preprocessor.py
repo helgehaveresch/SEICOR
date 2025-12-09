@@ -36,6 +36,7 @@ import SEICOR.impact
 import SEICOR.enhancements
 import SEICOR.plotting
 import SEICOR.plumes
+import SEICOR.wind  
 
 with open(SETTINGS_PATH, "r") as file:
     settings = yaml.safe_load(file)
@@ -786,6 +787,9 @@ if settings["Plotting"]["generate_plots"]:
 import xarray as xr 
 import pandas as pd
 import shutil
+import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor
+import numpy as np
 #load median wind dataset
 median_wind_file = weather_stations_dir / f"Median_winddata" / f"median_winddata_hourly.csv"
 df_median_wind = pd.read_csv(median_wind_file, parse_dates=["time"])
@@ -823,29 +827,143 @@ hour_keys = pd.Series(df_all_ship_passes.index.strftime("%Y-%m-%d %H"), index=df
 df_all_ship_passes_mask = hour_keys.isin(valid_hour_keys)
 df_all_ship_passes_filtered = df_all_ship_passes.loc[df_all_ship_passes_mask].copy()
 df_all_ship_passes_filtered.sort_index(inplace=True)
+# Map median wind values (hourly) to each ship pass by matching the same hour
+hour_map = pd.to_datetime(df_median_wind_kept["time"]).dt.strftime("%Y-%m-%d %H")
+# create a lookup Series for speed and direction
+median_speed_lookup = pd.Series(df_median_wind_kept["median_wspd"].values, index=hour_map.values)
+median_dir_lookup = pd.Series(df_median_wind_kept["median_wdir"].values, index=hour_map.values)
+
+# compute hour keys for ship passes (we already used this earlier as `hour_keys`)
+ship_hour_keys = df_all_ship_passes_filtered.index.strftime("%Y-%m-%d %H")
+
+# Map into new columns; missing values will remain NaN
+df_all_ship_passes_filtered = df_all_ship_passes_filtered.assign(
+    median_wind_speed=ship_hour_keys.map(median_speed_lookup),
+    median_wind_dir=ship_hour_keys.map(median_dir_lookup),
+)
 # %%
-for idx, ship_pass in df_all_ship_passes_filtered.iterrows():
+def _process_ship_pass_task(task):
+    """Worker function to process a single ship_pass task.
+
+    task: tuple (idx, row_dict)
+    Returns: dict with status info
+    """
+    import xarray as xr
+    import shutil
+    from pathlib import Path
+    import numpy as _np
+    import SEICOR.wind
+    idx, row = task
     try:
+        ship_pass = row
         stored = ship_pass.get("plume_file", None)
+        if stored is None:
+            return {"idx": idx, "status": "no_plume_file"}
         fn = Path(stored).name
-        date = ship_pass['Closest_Impact_Measurement_Time'].strftime('%y%m%d')
-        out_dir = Path(f"E:\\plumes\\plumes_{date}")
+        date = pd.to_datetime(ship_pass['Closest_Impact_Measurement_Time']).strftime('%y%m%d')
+        out_dir = Path(f"Q:\\BREDOM\\SEICOR\\plumes\\plumes_{date}")
         plume_file = out_dir / fn
         ds_plume = xr.open_dataset(plume_file)
         plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
-        if plume_found:
-            #copy the respective plume_detection_file to a separate folder for further analysis
-            image_path = Path(f"Q:\\BREDOM\\SEICOR\\analysis\\plume_detection\\plumes_{date}\\ship_yes")
-            fn = f"plume_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_ship.png"
-            original_image_path = image_path / fn
-            dst_path = Path(r"Q:\BREDOM\SEICOR\analysis\wind_filtered_plots")
-            shutil.copy(original_image_path, dst_path / fn)
-            pass
-        elif not plume_found:
-            print("no plume found")
+        if not plume_found:
+            return {"idx": idx, "status": "no_plume_found"}
+
+        rel_wind_speed, rel_wind_dir = SEICOR.wind.compute_relative_wind(ship_pass.get('Mean_Speed'), ship_pass.get('Mean_Course'), ship_pass.get('median_wind_speed'), ship_pass.get('median_wind_dir'))
+
+        image_path = Path(f"Q:\\BREDOM\\SEICOR\\analysis\\plume_detection\\plumes_{date}\\ship_yes")
+        dst_path = Path(r"Q:\BREDOM\SEICOR\analysis\wind_filtered_plots")
+
+        t = pd.to_datetime(ds_plume.attrs.get('t'))
+        time_nounder = t.strftime('%Y%m%d_%H%M%S')
+        mmsi = ds_plume.attrs.get('mmsi')
+
+        candidates = [
+            f"plume_{time_nounder}_{mmsi}_mask_plume.png",
+            f"plume_{time_nounder}_{mmsi}_mask_ship.png",
+        ]
+
+        found = False
+        for candidate in candidates:
+            original_image_path = image_path / candidate
+            if original_image_path.exists():
+                try:
+                    dst_path.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(original_image_path, dst_path / candidate)
+
+                    # classify by relative wind speed
+                    rel_gt_dir = dst_path / "rel_wind_gt2"
+                    rel_lt_dir = dst_path / "rel_wind_lt2"
+                    rel_gt_dir.mkdir(parents=True, exist_ok=True)
+                    rel_lt_dir.mkdir(parents=True, exist_ok=True)
+
+                    try:
+                        rws = float(rel_wind_speed)
+                    except Exception:
+                        rws = None
+
+                    if rws is not None and (not _np.isnan(rws)):
+                        if rws > 2.0:
+                            shutil.copy(original_image_path, rel_gt_dir / candidate)
+                        else:
+                            shutil.copy(original_image_path, rel_lt_dir / candidate)
+
+                    # classify by wind direction relative to ship
+                    try:
+                        wind_from = float(ship_pass.get('median_wind_dir'))
+                        ship_course = float(ship_pass.get('Mean_Course'))
+                    except Exception:
+                        wind_from = None
+                        ship_course = None
+
+                    if wind_from is not None and ship_course is not None:
+                        wind_to = (wind_from + 180.0) % 360.0
+                        def angdiff(a, b):
+                            d = (a - b + 180.0) % 360.0 - 180.0
+                            return abs(d)
+                        thresh_deg = 15.0
+                        same_dir = angdiff(wind_to, ship_course) <= thresh_deg
+                        against_dir = angdiff(wind_from, ship_course) <= thresh_deg
+
+                        same_dir_dir = dst_path / "wind_same_dir"
+                        against_dir_dir = dst_path / "wind_against_dir"
+                        same_dir_dir.mkdir(parents=True, exist_ok=True)
+                        against_dir_dir.mkdir(parents=True, exist_ok=True)
+
+                        if same_dir:
+                            shutil.copy(original_image_path, same_dir_dir / candidate)
+                        elif against_dir:
+                            shutil.copy(original_image_path, against_dir_dir / candidate)
+
+                    found = True
+                    break
+                except Exception as e:
+                    return {"idx": idx, "status": "copy_failed", "error": str(e)}
+
+        if not found:
+            return {"idx": idx, "status": "no_image_found", "tried": candidates}
+
+        return {"idx": idx, "status": "ok", "image": str(plume_file)}
+
     except Exception as e:
-        pass
-        print(f"Could not open plume file {plume_file}: {e}")
+        return {"idx": idx, "status": "error", "error": str(e)}
+
+
+# Run processing in parallel using a process pool
+tasks = [(idx, row.to_dict()) for idx, row in df_all_ship_passes_filtered.iterrows()]
+
+def run_ship_passes_parallel(tasks_list, max_workers=10):
+    """Run the ship-pass tasks in parallel and return results list."""
+    with ProcessPoolExecutor(max_workers=max_workers) as exe:
+        results = list(exe.map(_process_ship_pass_task, tasks_list))
+    return results
+
+
+if __name__ == '__main__':
+    if tasks:
+        results = run_ship_passes_parallel(tasks, max_workers=1)
+        for r in results:
+            if r.get("status") not in ("ok", "no_plume_found"):
+                print(f"Task result: {r}")
 
 
 # %%
