@@ -125,7 +125,7 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
             ref_found=str(ref_found),
         ),
     )
-
+    ds["vea"] = np.round(ds.vea - 90.0, 1)
     if df_lp is not None:
         lp_window = ((df_lp.index >= t - pd.Timedelta(minutes=window_minutes[0])) & (df_lp.index < t + pd.Timedelta(minutes=window_minutes[1])))
         lp_window_ref = ((df_lp.index >= ref_start) & (df_lp.index < ref_end))

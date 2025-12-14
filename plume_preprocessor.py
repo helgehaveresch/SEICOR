@@ -24,6 +24,7 @@ SETTINGS_PATH = Path("PLUME_SETTINGS_PATH", _default_settings_path)
 
 import netCDF4 #oder
 import xarray as xr
+import pandas as pd
 sys.path.append(str(SCRIPTS_DIR))
 from doas_tools.file_handling import read_SC_file_imaging
 from imaging_tools.process_SC import mask_zenith, correct_destriped_for_noon_reference
@@ -80,9 +81,31 @@ ds_impact = SEICOR.impact.rolling_impact(ds_impact, window=processing_settings["
 endpoints_los = SEICOR.impact.calculate_LOS(ds_impact, instrument_location)
 lat2, lon2 = endpoints_los[:, 0], endpoints_los[:, 1] #todo: to be replaced 
 start_time, end_time, measurement_times = SEICOR.impact.calc_start_end_times(ds_impact)
+#%% read median wind data set from weather stations
+median_wind_file = weather_stations_dir / f"Median_winddata" / f"median_winddata_hourly.csv"
+df_median_wind = pd.read_csv(median_wind_file, parse_dates=["time"])
 #%% Initialize in-situ data
 try:
     df_insitu = SEICOR.in_situ.read_in_situ(in_situ_path, date)
+    
+    # replace in-situ wind values with nearest-time median wind observations
+    # some sources provide time as the index — ensure a `time` column exists
+    
+    df_insitu = df_insitu.reset_index()
+    df_insitu.rename(columns={df_insitu.columns[0]: 'time'}, inplace=True)
+    df_insitu['time'] = pd.to_datetime(df_insitu['time'], utc=True)
+    df_median_wind['time'] = pd.to_datetime(df_median_wind['time'], utc=True)
+    left = df_insitu.sort_values('time').reset_index(drop=True)
+    right = df_median_wind.sort_values('time').reset_index(drop=True)
+    merged = pd.merge_asof(left, right[['time', 'median_wspd', 'median_wdir']], on='time', direction='nearest')
+    if 'median_wspd' in merged.columns:
+        merged['wind_speed'] = merged['median_wspd']
+    if 'median_wdir' in merged.columns:
+        merged['wind_dir'] = merged['median_wdir']
+    # adopt merged dataframe as df_insitu (keeps other columns)
+    df_insitu = merged
+    # restore time as the index (original data often used time as index)
+    df_insitu = df_insitu.set_index('time')
     df_insitu = SEICOR.in_situ.apply_time_mask_to_insitu(df_insitu, start_time, end_time)
     ds_impact = SEICOR.impact.calculate_path_averaged_vmr_no2(df_insitu, ds_impact)
 except Exception as e:
@@ -123,71 +146,34 @@ ship_passes = SEICOR.plumes.add_plume_file_paths_to_ship_passes(ship_passes, plu
 Path(ship_passes_out_dir).mkdir(parents=True, exist_ok=True)
 ship_passes.to_csv(ship_passes_out_dir / f"ship_passes_{date}.csv")
 
-#%%
-import matplotlib.pyplot as plt
-import pandas as pd
-
-
-#%%
-def plot_reference_image_with_plume_mask(ds_plume, out_dir, date, p_threshold=0.2, min_cluster_size = 0.2):
-    ref_image = ds_plume["no2_ref"] - ds_plume["no2_ref"].mean(dim="window_ref")
-    mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=p_threshold, min_cluster_size=min_cluster_size)
-    plt.imshow(ref_image.values, origin="lower", aspect="auto", cmap="viridis")
-    plt.colorbar()
-    plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
-    plt.title("Reference image with detected plume pixels")
-    if mask.sum() > 0:
-        os.makedirs(out_dir / f"reference_quality" / f"plumes_{date}_upwind" / f"yes_plume", exist_ok=True)
-        plt.savefig(out_dir / f"reference_quality" / f"plumes_{date}_upwind" / f"yes_plume" / f"reference_image_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
-        plt.close('all')
-    else:
-        os.makedirs(out_dir / f"reference_quality" / f"plumes_{date}_upwind" / f"no_plume", exist_ok=True)
-        plt.savefig(out_dir / f"reference_quality" / f"plumes_{date}_upwind" / f"no_plume" / f"reference_image_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
-        plt.close('all')
-
-#%%
+#%% Process each ship pass
 for idx, ship_pass_single in ship_passes.iterrows():
     ds_plume = SEICOR.enhancements.upwind_constant_background_enh(ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
     if ds_plume is not None:
-        plot_reference_image_with_plume_mask(ds_plume, out_dir, date, p_threshold=0.15, min_cluster_size=30)
         ds_plume = SEICOR.plumes.add_ship_trajectory_to_plume_ds(ds_plume, filtered_ship_groups)
         ds_plume = SEICOR.plumes.add_insitu_to_plume_ds(ds_plume, df_insitu)
         #ds_plume = SEICOR.impact.call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds_plume, ship_pass_single, settings["processing"]["enhancement"]["nlin_param_file"], IMPACT_path)
         ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
-        ds_plume = SEICOR.plumes.sort_plumes(ds_plume, out_dir, p_threshold_plume=0.02, p_threshold_ship=0.02, date=date)
         Path(plumes_out_dir).mkdir(parents=True, exist_ok=True)
+        ds_plume = SEICOR.plumes.sort_plumes(ds_plume, out_dir, p_threshold_plume=0.01, p_threshold_ship=0.02, date=date)
+        if settings["Plotting"]["generate_plots"] and ds_plume.attrs.get("plume_or_ship_found", "False") == "True":
+            ref_image = ds_plume["no2_ref"] - ds_plume["no2_ref"].mean(dim="window_ref")
+            mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=30, ds_plume=ds_plume)
+            SEICOR.plotting.plot_reference_image_with_plume_mask(ref_image, mask, ds_plume, out_dir, date)
         ds_plume.to_netcdf(Path(ship_pass_single['plume_file']), mode="w")
 
-
-
+# %%
 for idx, row in ship_passes.iterrows():
     plume_file = row['plume_file']
     try:
         ds_plume = xr.open_dataset(plume_file)
         plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
         if plume_found:
-            # prefer interpolated enhancement, fall back to c_back if missing
-            if 'no2_enhancement_interp' in ds_plume.variables:
-                varname = 'no2_enhancement_interp'
-            elif 'no2_enhancement_c_back' in ds_plume.variables:
-                varname = 'no2_enhancement_c_back'
-            else:
-                print(f"{plume_file}: no enhancement variable found; skipping")
-                ds_plume.close()
-                continue
-
-            arr = ds_plume[varname].values
-            mask = SEICOR.plumes.detect_plume_ztest(arr, p_threshold=0.15, min_cluster_size=5, connectivity=1, kernel_arm=1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
-            plt.figure(figsize=(10, 6))
-            plt.imshow(arr, origin="lower", aspect="auto", cmap="viridis")
-            plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
-            plt.title("No2 enhancement with detected plume pixels")
-            os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}0", exist_ok=True)
-            plt.savefig(out_dir / f"plume_mask" / f"plumes_{date}0" / f"no2_enhancement_with_plume_mask_{date}_{pd.to_datetime(ds_plume.attrs.get('t')).strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}.png")
-            plt.close('all')
+            mask = SEICOR.plumes.detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.25, min_cluster_size=5, connectivity=1, kernel_arm = 1, require_connection=True, ds_plume=ds_plume, keep_second_largest=False, second_size_threshold=100)
+            SEICOR.plotting.plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date)
     except Exception as e:
         print(f"Could not open plume file {plume_file}: {e}")
-#
+#%%
 #import xarray as xr
 #for idx, row in ship_passes.iterrows():
 #    plume_file = row['plume_file']
@@ -491,7 +477,8 @@ for idx, row in ship_passes.iterrows():
 #    except Exception as e:
 #        print(f"Could not open plume file {plume_file}: {e}")
 
-#%%
+# %%
+
 if settings["Plotting"]["generate_plots"]:
 
     def _safe_run(name, fn, *args, **kwargs):
@@ -610,190 +597,3 @@ if settings["Plotting"]["generate_plots"]:
         save=True,
         out_dir=out_dir,
     )
-
-# %%
-import xarray as xr 
-import pandas as pd
-import shutil
-import numpy as np
-#load median wind dataset
-median_wind_file = weather_stations_dir / f"Median_winddata" / f"median_winddata_hourly.csv"
-df_median_wind = pd.read_csv(median_wind_file, parse_dates=["time"])
-
-# find best matching column names for direction and speed
-dir_candidates = ["median_wdir", "median_wind_dir", "wind_dir", "wdir", "direction"]
-speed_candidates = ["median_wspd", "median_wspd_reported", "median_speed_uv", "median_wind_speed", "wind_speed", "wspd"]
-
-# define angular ranges (degrees)
-r1_lo, r1_hi = 273.2, 293.2
-r2_lo, r2_hi =  93.2, 113.2
-
-# build masks: direction in either range AND speed > 2 m/s
-dir_vals = df_median_wind["median_wdir"]
-speed_vals = df_median_wind["median_wspd"]
-
-mask_dir = dir_vals.between(r1_lo, r1_hi) | dir_vals.between(r2_lo, r2_hi)
-mask_speed = speed_vals > 2.0
-
-median_keep_mask = mask_dir & mask_speed & dir_vals.notna() & speed_vals.notna()
-
-# filtered dataframe and list of valid times
-df_median_wind_filtered = df_median_wind.loc[median_keep_mask].copy().reset_index(drop=True)
-valid_median_times = pd.to_datetime(df_median_wind_filtered["time"]) if "time" in df_median_wind_filtered.columns else df_median_wind_filtered.index
-
-# expose filtered objects for downstream use
-df_median_wind = df_median_wind  # keep original
-df_median_wind_kept = df_median_wind_filtered
-valid_median_times = valid_median_times
-
-df_all_ship_passes = pd.read_csv(ship_passes_out_dir / f"all_ship_passes.csv", parse_dates=["UTC_Time", "Closest_Impact_Measurement_Time" ]).set_index("UTC_Time")
-# %%
-valid_hour_keys = set(valid_median_times.dt.strftime("%Y-%m-%d %H"))
-hour_keys = pd.Series(df_all_ship_passes.index.strftime("%Y-%m-%d %H"), index=df_all_ship_passes.index)
-df_all_ship_passes_mask = hour_keys.isin(valid_hour_keys)
-df_all_ship_passes_filtered = df_all_ship_passes.loc[df_all_ship_passes_mask].copy()
-df_all_ship_passes_filtered.sort_index(inplace=True)
-# Map median wind values (hourly) to each ship pass by matching the same hour
-hour_map = pd.to_datetime(df_median_wind_kept["time"]).dt.strftime("%Y-%m-%d %H")
-# create a lookup Series for speed and direction
-median_speed_lookup = pd.Series(df_median_wind_kept["median_wspd"].values, index=hour_map.values)
-median_dir_lookup = pd.Series(df_median_wind_kept["median_wdir"].values, index=hour_map.values)
-
-# compute hour keys for ship passes (we already used this earlier as `hour_keys`)
-ship_hour_keys = df_all_ship_passes_filtered.index.strftime("%Y-%m-%d %H")
-
-# Map into new columns; missing values will remain NaN
-df_all_ship_passes_filtered = df_all_ship_passes_filtered.assign(
-    median_wind_speed=ship_hour_keys.map(median_speed_lookup),
-    median_wind_dir=ship_hour_keys.map(median_dir_lookup),
-)
-# %%
-for idx, ship_pass in df_all_ship_passes_filtered.iterrows():
-    try:
-        stored = ship_pass.get("plume_file", None)
-        fn = Path(stored).name
-        date = ship_pass['Closest_Impact_Measurement_Time'].strftime('%y%m%d')
-        out_dir = Path(f"Q:\\BREDOM\\SEICOR\\plumes\\plumes_{date}")
-        plume_file = out_dir / fn
-        ds_plume = xr.open_dataset(plume_file)
-        plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
-        if plume_found:
-            rel_wind_speed, rel_wind_dir = SEICOR.wind.compute_relative_wind(ship_pass['Mean_Speed'], ship_pass['Mean_Course'], ship_pass['median_wind_speed'], ship_pass['median_wind_dir'])
-
-            #copy the respective plume_detection_file to a separate folder for further analysis
-            image_path = Path(f"Q:\\BREDOM\\SEICOR\\analysis\\plume_detection\\plumes_{date}\\ship_yes")
-            dst_path = Path(r"Q:\BREDOM\SEICOR\analysis\wind_filtered_plots")
-
-            # Prepare candidate filename patterns to handle variations in how images were saved
-            t = pd.to_datetime(ds_plume.attrs.get('t'))
-            time_nounder = t.strftime('%Y%m%d_%H%M%S')
-            mmsi = ds_plume.attrs.get('mmsi')
-
-            candidates = [
-                f"plume_{time_nounder}_{mmsi}_mask_plume.png",
-                f"plume_{time_nounder}_{mmsi}_mask_ship.png",
-            ]
-
-            found = False
-            for candidate in candidates:
-                original_image_path = image_path / candidate
-                if original_image_path.exists():
-                    try:
-                        shutil.copy(original_image_path, dst_path / candidate)
-                        print(f"Copied to {dst_path / candidate}")
-                        # also copy into relative-wind-classified subfolders
-                        rel_gt_dir = dst_path / "rel_wind_gt2"
-                        rel_lt_dir = dst_path / "rel_wind_lt2"
-                        rel_gt_dir.mkdir(parents=True, exist_ok=True)
-                        rel_lt_dir.mkdir(parents=True, exist_ok=True)
-
-                        try:
-                            rws = float(rel_wind_speed)
-                        except Exception:
-                            rws = None
-
-                        if rws is None or np.isnan(rws):
-                            # unknown relative wind: leave only in main dst
-                            pass
-                        elif rws > 2.0:
-                            try:
-                                shutil.copy(original_image_path, rel_gt_dir / candidate)
-                                print(f"Copied to {rel_gt_dir}")
-                            except Exception as e:
-                                print(f"Failed to copy to {rel_gt_dir}: {e}")
-                        else:
-                            try:
-                                shutil.copy(original_image_path, rel_lt_dir / candidate)
-                                print(f"Copied to {rel_lt_dir}")
-                            except Exception as e:
-                                print(f"Failed to copy to {rel_lt_dir}: {e}")
-
-                        # Also classify by wind direction relative to ship course
-                        try:
-                            wind_from = float(ship_pass.get('median_wind_dir'))
-                            ship_course = float(ship_pass.get('Mean_Course'))
-                        except Exception:
-                            wind_from = None
-                            ship_course = None
-
-                        if wind_from is not None and ship_course is not None:
-                            # wind_to is the direction the wind is going TO (meteorological from + 180)
-                            wind_to = (wind_from + 180.0) % 360.0
-
-                            def angdiff(a, b):
-                                d = (a - b + 180.0) % 360.0 - 180.0
-                                return abs(d)
-
-                            thresh_deg = 15.0
-                            same_dir = angdiff(wind_to, ship_course) <= thresh_deg
-                            against_dir = angdiff(wind_from, ship_course) <= thresh_deg
-
-                            same_dir_dir = dst_path / "wind_same_dir"
-                            against_dir_dir = dst_path / "wind_against_dir"
-                            against_dir_dir_low = dst_path / "wind_against_dir_low_speed"
-                            same_dir_dir.mkdir(parents=True, exist_ok=True)
-                            against_dir_dir.mkdir(parents=True, exist_ok=True)
-                            against_dir_dir_low.mkdir(parents=True, exist_ok=True)
-
-                            if same_dir:
-                                try:
-                                    shutil.copy(original_image_path, same_dir_dir / candidate)
-                                    print(f"Copied to {same_dir_dir}")
-                                except Exception as e:
-                                    print(f"Failed to copy to {same_dir_dir}: {e}")
-                            elif against_dir:
-                                # Only classify as 'against' when relative wind speed is sufficiently large
-                                try:
-                                    rws_check = float(rel_wind_speed)
-                                except Exception:
-                                    rws_check = None
-
-                                if rws_check is None or np.isnan(rws_check):
-                                    print(f"Against-wind detected but relative wind unknown; skipping against_dir copy for {candidate}")
-                                elif rws_check <= 2.0:
-                                    try:
-                                        shutil.copy(original_image_path, against_dir_dir_low / candidate)
-                                        print(f"Copied to {against_dir_dir_low}")
-                                    except Exception as e:
-                                        print(f"Failed to copy to {against_dir_dir_low}: {e}")
-                                else:
-                                    print(f"Against-wind detected but relative wind {rws_check:.2f} < 2.0 m/s; skipping against_dir copy for {candidate}")
-
-                        found = True
-                        break
-                    except Exception as e:
-                        print(f"Failed to copy {original_image_path} -> {dst_path / candidate}: {e}")
-                        found = True
-                        break
-
-            if not found:
-                print(f"No plume image found for plume file {plume_file}. Tried: {candidates}")
-            pass
-        elif not plume_found:
-            print("no plume found")
-    except Exception as e:
-        pass
-        print(f"Could not open plume file {plume_file}: {e}")
-
-
-# %%
