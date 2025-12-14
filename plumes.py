@@ -311,19 +311,27 @@ def detect_plume_ztest_left(
 import matplotlib.pyplot as plt
 
 def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_ship=0.3):
-    if "no2_enhancement_interp" not in ds_plume:
-        print("no NO2_enhancement_interp in dataset")
+    # prefer interpolated enhancement, fall back to c_back variant
+    if 'no2_enhancement_interp' in ds_plume:
+        varname = 'no2_enhancement_interp'
+    elif 'no2_enhancement_c_back' in ds_plume:
+        varname = 'no2_enhancement_c_back'
+    else:
+        print('no NO2 enhancement variable (interp or c_back) in dataset')
         return ds_plume
+
     slice_rows = slice(8,20)
     tol = pd.Timedelta("50s")
     times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
     t0 = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
     win_mask = (times >= (t0 - tol)) & (times <= (t0 + tol))
     idx = np.nonzero(win_mask)[0]
-    image_cut_plume = ds_plume["no2_enhancement_interp"].isel(image_row = slice_rows, window_plume = idx).values
-    mask = detect_plume_ztest(image_cut_plume, bg_mean = ds_plume["no2_enhancement_interp"].mean().values, bg_std= ds_plume["no2_enhancement_interp"].std().values, p_threshold=p_threshold_plume)
+    image_cut_plume = ds_plume[varname].isel(image_row = slice_rows, window_plume = idx).values
+    bg_mean_val = ds_plume[varname].mean().values
+    bg_std_val = ds_plume[varname].std().values
+    mask = detect_plume_ztest(image_cut_plume, bg_mean = bg_mean_val, bg_std= bg_std_val, p_threshold=p_threshold_plume)
 
-    image_full = ds_plume["no2_enhancement_interp"].values
+    image_full = ds_plume[varname].values
 
     # create full-size mask and put the detected mask into the correct location
     mask_full = np.zeros_like(image_full, dtype=bool)
@@ -359,10 +367,10 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         t0 = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
         win_mask = (times >= (t0 - tol)) & (times <= (t0 + tol))
         idx = np.nonzero(win_mask)[0]
-        image_cut_ship = ds_plume["no2_enhancement_interp"].isel(image_row = slice_rows, window_plume = idx).values
-        mask = detect_plume_ztest_left(image_cut_ship, bg_mean = ds_plume["no2_enhancement_interp"].mean().values, bg_std= ds_plume["no2_enhancement_interp"].std().values, p_threshold=p_threshold_ship, min_cluster_size=20)
+        image_cut_ship = ds_plume[varname].isel(image_row = slice_rows, window_plume = idx).values
+        mask = detect_plume_ztest_left(image_cut_ship, bg_mean = bg_mean_val, bg_std= bg_std_val, p_threshold=p_threshold_ship, min_cluster_size=20)
 
-        image_full = ds_plume["no2_enhancement_interp"].values
+        image_full = ds_plume[varname].values
 
         # create full-size mask and put the detected mask into the correct location
         mask_full = np.zeros_like(image_full, dtype=bool)
