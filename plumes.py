@@ -124,19 +124,30 @@ def detect_plume_ztest(
     kernel_arm=1,
     median_kernel_arm=None,
     connectivity=1,
+    # new options for source-connection checking
+    require_connection=False,
+    ds_plume=None,
+    time_tol_seconds=30,
+    viewdir_min=8,
+    viewdir_max=18,
+    # option to keep second largest cluster
+    keep_second_largest=False,
+    second_size_threshold=None,
 ):
     """
     Detect plume pixels using the neighborhood Z-test described (Kuhlmann et al. 2019).
-    - image: 2D numpy array (X_pix values, e.g. XCO2 or enhancement)
-    - bg_mean: scalar or 2D array with background mean (if None compute global mean)
-    - bg_std: scalar or 2D array with background std (if None compute global std)
-    - p_threshold: p-value cutoff (right-sided test). Default 0.20 as in text.
-    - min_cluster_size: remove clusters smaller than this (pixels).
-    - kernel_arm: arm length for the cross used for neighborhood mean (1 => center + 4 neighbors)
-    - median_kernel_arm: arm length for median smoothing kernel (if None uses kernel_arm+1)
-    - connectivity: connectivity for labeling (1 => 4-connectivity on 2D)
-    Returns binary mask (bool) of plume pixels.
+
+    New parameters:
+    - require_connection: if True, at least one kept cluster must intersect the source region.
+    - t0: central timestamp of source event (datetime or numeric same units as time_grid).
+    - time_grid: 2D array (same shape as image) with timestamp per pixel (datetime64 or numeric seconds).
+    - viewdir_grid: 2D array (same shape as image) with viewing direction per pixel (numeric).
+    - time_tol_seconds: tolerance around t0 (seconds) to define source-region in time.
+    - viewdir_min/viewdir_max: viewing direction window to define source-region.
+    - keep_second_largest: if True, also include second largest cluster when it exceeds second_size_threshold.
+    - second_size_threshold: required size (pixels) for second largest cluster to be kept. If None defaults to min_cluster_size.
     """
+    kernel_arm=1
     if image.ndim != 2:
         raise ValueError("image must be 2D")
 
@@ -144,7 +155,6 @@ def detect_plume_ztest(
         bg_mean = np.nanmean(image)
     if bg_std is None:
         bg_std = np.nanstd(image, ddof=0)
-    # allow bg_mean/bg_std to be scalars or arrays
     bg_mean = np.asarray(bg_mean)
     bg_std = np.asarray(bg_std)
 
@@ -161,7 +171,6 @@ def detect_plume_ztest(
 
     # compute neighborhood mean while ignoring NaNs
     def local_mean(arr, footprint):
-        # ndimage.generic_filter with nan handling
         def _func(values):
             vals = values[~np.isnan(values)]
             return vals.mean() if vals.size else np.nan
@@ -169,18 +178,12 @@ def detect_plume_ztest(
 
     neigh_mean = local_mean(image, footprint)
 
-    # Z-score (right-sided test)
-    # if bg_mean/bg_std are scalars they broadcast, if arrays must match image shape
     with np.errstate(divide="ignore", invalid="ignore"):
         z = (neigh_mean - bg_mean) / bg_std
-    # p = P(sample >= observed) under H0 where H0 mean==bg_mean -> right-sided p = 1 - CDF(z)
-    # but text defines p = CDF(-z) which equals 1 - CDF(z) for normal
     pvals = norm.cdf(-z)
 
-    # initial binary mask: reject H0 when p <= p_threshold (plume pixel)
-    mask_ini = (pvals <= p_threshold) & (~np.isnan(pvals))
-    mask = mask_ini
-    # median filter smoothing with larger cross kernel (arms +1 by default)
+    mask = (pvals <= p_threshold) & (~np.isnan(pvals))
+
     if median_kernel_arm is None:
         median_kernel_arm = kernel_arm + 1
     size_m = 2 * median_kernel_arm + 1
@@ -193,29 +196,99 @@ def detect_plume_ztest(
         footprint_m[cm, cm + a] = True
         footprint_m[cm, cm - a] = True
 
-    # median filter (apply to integer mask)
-    mask_smoothed = ndimage.median_filter(mask.astype(np.uint8), footprint=footprint_m, mode="constant", cval=0)
-    mask = mask_smoothed.astype(bool)
+    #mask_smoothed = ndimage.median_filter(mask.astype(np.uint8), footprint=footprint_m, mode="constant", cval=0)
+    #mask = mask_smoothed.astype(bool)
 
-    # remove small clusters and keep the largest cluster per description
     labeled, ncomp = ndimage.label(mask, structure=ndimage.generate_binary_structure(2, connectivity))
     if ncomp == 0:
         return mask  # empty
-    #print(f"mask has {ncomp} initial clusters labeled {labeled}")
-
+    
+    #sort out all clusters smaller than min_cluster_size
     sizes = ndimage.sum(mask, labeled, range(1, ncomp + 1))
-    # remove clusters smaller than min_cluster_size
     keep_labels = [i + 1 for i, s in enumerate(sizes) if s >= min_cluster_size]
     if not keep_labels:
         return np.zeros_like(mask, dtype=bool)
 
-    # build mask containing only clusters >= threshold
+    if require_connection:
+            # helper: build source_mask if required
+        source_mask = None
+        # assume times_plume is 1D (columns) and image_row is 1D (rows)
+        times_1d = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
+        t0_dt = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
+
+        # 1D boolean masks
+        time_ok_1d = np.abs(times_1d - t0_dt) <= pd.Timedelta(seconds=time_tol_seconds)
+        vd_1d = np.asarray(ds_plume.image_row)
+        view_ok_1d = (vd_1d >= viewdir_min) & (vd_1d <= viewdir_max)
+
+        # broadcast to image shape: time -> columns, view -> rows
+        try:
+            time_ok = np.broadcast_to(time_ok_1d[None, :], image.shape)   # shape (rows, cols)
+            view_ok = np.broadcast_to(view_ok_1d[:, None], image.shape)   # shape (rows, cols)
+        except Exception:
+            # fallback if broadcast_to fails (shouldn't), use tile
+            time_ok = np.tile(time_ok_1d[None, :], (image.shape[0], 1))
+            view_ok = np.tile(view_ok_1d[:, None], (1, image.shape[1]))
+
+        source_mask = time_ok & view_ok
+
+        if source_mask.shape != image.shape:
+            raise ValueError("time_grid and viewdir_grid must have same shape as image")
+    # filter clusters by min size first
     mask_filtered = np.isin(labeled, keep_labels)
 
-    # choose largest cluster as final plume mask
-    sizes_keep = [(lab, s) for lab, s in zip(range(1, ncomp + 1), sizes) if (lab in keep_labels)]
-    largest_label = max(sizes_keep, key=lambda x: x[1])[0]
+    kept_sizes = [(lab, s) for lab, s in zip(range(1, ncomp + 1), sizes) if lab in keep_labels]
+    if not kept_sizes:
+        return np.zeros_like(mask, dtype=bool)
+
+    # sort kept clusters by size descending
+    kept_sizes_sorted = sorted(kept_sizes, key=lambda x: x[1], reverse=True)
+    largest_label = kept_sizes_sorted[0][0]
+    largest_size = kept_sizes_sorted[0][1]
+
+    # default final mask = largest cluster
     final_mask = (labeled == largest_label)
+
+    # if second largest requested, note its label/size
+    sec_label = sec_size = None
+    if len(kept_sizes_sorted) > 1:
+        sec_label, sec_size = kept_sizes_sorted[1]
+    second_threshold = second_size_threshold if second_size_threshold is not None else min_cluster_size
+
+    # if connection to source is required, enforce rules described:
+    if require_connection:
+        # list of kept labels that intersect the source region
+        intersecting_labels = [lab for lab, _ in kept_sizes_sorted if np.any((labeled == lab) & source_mask)]
+
+        # if no kept cluster intersects source region -> no contour
+        if not intersecting_labels:
+            return np.zeros_like(mask, dtype=bool)
+
+        # if largest cluster intersects source -> plot it (and optionally second largest)
+        if largest_label in intersecting_labels:
+            final_mask = (labeled == largest_label)
+            if keep_second_largest and sec_label is not None and sec_size >= second_threshold:
+                final_mask = final_mask | (labeled == sec_label)
+            return final_mask
+
+        # largest cluster does NOT intersect source region, but at least one cluster does
+        # pick the intersecting cluster with largest size (closest/most significant in source region)
+        # build dict for sizes to pick the largest intersecting cluster
+        sizes_dict = {lab: s for lab, s in kept_sizes_sorted}
+        best_intersect_label = max(intersecting_labels, key=lambda L: sizes_dict.get(L, 0))
+
+        # plot the intersecting cluster instead (discard largest)
+        final_mask = (labeled == best_intersect_label)
+
+        # if keep_second_largest requested, also include the original largest cluster
+        if keep_second_largest:
+            final_mask = final_mask | (labeled == largest_label)
+
+        return final_mask
+
+    # if require_connection is False: keep previous behavior (largest, optionally second largest)
+    if keep_second_largest and sec_label is not None and sec_size >= second_threshold:
+        final_mask = final_mask | (labeled == sec_label)
 
     return final_mask
 
@@ -330,20 +403,45 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
     # slice_rows is a slice object, idx is the 1D array of time/column indices
     mask_full[slice_rows, idx] = mask
 
-    # plot image with plume boundary overlay
+    # plot image with plume boundary overlay using time on x-axis and VEA on y-axis
+    import matplotlib.dates as mdates
     fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(image_full, origin="lower", aspect="auto", cmap="viridis")
-    fig.colorbar(im, ax=ax, label="NO$_2$ enhancement")
+    # time coordinate (columns) and VEA (rows)
+    times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
+    ny, nx = image_full.shape
+    # build xedges from times
+    xnum = mdates.date2num(times.to_pydatetime())
+    dx = np.diff(xnum)
+    if len(dx) > 0:
+        left = xnum[0] - dx[0] / 2.0
+        right = xnum[-1] + dx[-1] / 2.0
+        xedges = np.concatenate(([left], xnum[:-1] + dx / 2.0, [right]))
+    else:
+        xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+    yedges = np.arange(ny + 1)
 
-    # semi-transparent overlay for the mask (correct location)
-    #ax.imshow(np.ma.masked_where(~mask_full, mask_full), origin="lower", cmap="Reds", alpha=0.25, aspect="auto")
+    mesh = ax.pcolormesh(xedges, yedges, image_full, cmap="viridis", shading="auto")
+    fig.colorbar(mesh, ax=ax, label="NO$_2$ enhancement")
 
-    # draw boundary around the mask region
-    ax.contour(mask_full.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
+    # draw boundary around the mask region using mesh centres
+    xcent = (xedges[:-1] + xedges[1:]) / 2.0
+    ycent = (yedges[:-1] + yedges[1:]) / 2.0
+    Xc, Yc = np.meshgrid(xcent, ycent)
+    ax.contour(Xc, Yc, mask_full.astype(int), levels=[0.5], colors="red", linewidths=1.5)
 
     ax.set_title("NO$_2$ enhancement with plume mask boundary (placed at correct location)")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
+    ax.set_xlabel("Time (UTC)")
+    vea_vals = ds_plume["vea"].values 
+    yticks = np.arange(0, len(vea_vals), 3)
+    ax.set_yticks(yticks)
+    ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
+    ax.set_ylabel("VEA / °")
+    ax.set_xlabel("Time (UTC)")
+    ax.set_ylabel("VEA / °")
+    ax.xaxis_date()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    fig.autofmt_xdate()
     plume_found = False
     ship_found = False
     if mask_full.sum() > 0:
@@ -369,17 +467,42 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         # slice_rows is a slice object, idx is the 1D array of time/column indices
         mask_full[slice_rows, idx] = mask
 
-        # plot image with plume boundary overlay
+        # plot image with plume boundary overlay using time on x-axis and VEA on y-axis
+        import matplotlib.dates as mdates
         fig, ax = plt.subplots(figsize=(8, 6))
-        im = ax.imshow(image_full, origin="lower", aspect="auto", cmap="viridis")
-        fig.colorbar(im, ax=ax, label="NO$_2$ enhancement")
+        times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
+        ny, nx = image_full.shape
+        xnum = mdates.date2num(times.to_pydatetime())
+        dx = np.diff(xnum)
+        if len(dx) > 0:
+            left = xnum[0] - dx[0] / 2.0
+            right = xnum[-1] + dx[-1] / 2.0
+            xedges = np.concatenate(([left], xnum[:-1] + dx / 2.0, [right]))
+        else:
+            xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+        yedges = np.arange(ny + 1)
 
-        # draw boundary around the mask region
-        ax.contour(mask_full.astype(int), levels=[0.5], colors="blue", linewidths=1.5, origin="lower")
+        mesh = ax.pcolormesh(xedges, yedges, image_full, cmap="viridis", shading="auto")
+        fig.colorbar(mesh, ax=ax, label="NO$_2$ enhancement")
+
+        xcent = (xedges[:-1] + xedges[1:]) / 2.0
+        ycent = (yedges[:-1] + yedges[1:]) / 2.0
+        Xc, Yc = np.meshgrid(xcent, ycent)
+        ax.contour(Xc, Yc, mask_full.astype(int), levels=[0.5], colors="blue", linewidths=1.5)
 
         ax.set_title("NO$_2$ enhancement with plume mask boundary (placed at correct location)")
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
+        ax.set_xlabel("Time (UTC)")
+        vea_vals = ds_plume["vea"].values 
+        yticks = np.arange(0, len(vea_vals), 3)
+        ax.set_yticks(yticks)
+        ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
+        ax.set_ylabel("VEA / °")
+        ax.set_xlabel("Time (UTC)")
+        ax.set_ylabel("VEA / °")
+        ax.xaxis_date()
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+        fig.autofmt_xdate()
         if mask_full.sum() == 0:
             savepath = out_dir / f"plume_detection" / f"plumes_{date}" / f"ship_no" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_out.png"
             os.makedirs(os.path.dirname(savepath), exist_ok=True)
