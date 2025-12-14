@@ -733,7 +733,7 @@ def plot_ship_pass_subplot_v1(
     yticks = np.arange(0, len(vea_vals), N)
     ax0.set_yticks(yticks)
     ax0.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
-    ax0.set_ylabel("LOS / °")
+    ax0.set_ylabel("VEA / °")
     ax0.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
     ax0.xaxis.set_major_locator(mdates.MinuteLocator(interval=1))
     plt.setp(ax0.get_xticklabels(), rotation=45)
@@ -918,7 +918,7 @@ def plot_ship_pass_subplot_v2(
     yticks = np.arange(0, len(vea_vals), N)
     ax0.set_yticks(yticks)
     ax0.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
-    ax0.set_ylabel("LOS / °")
+    ax0.set_ylabel("VEA / °")
     ax0.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
     ax0.xaxis.set_major_locator(mdates.MinuteLocator(interval=1))
     plt.setp(ax0.get_xticklabels(), rotation=45)
@@ -1595,3 +1595,134 @@ def plot_enhancement_impact_and_insitu(
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(no2_out_dir, f"NO2_enhancement_vmr_{date}.png"))
+
+
+def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
+    """Plot NO2 enhancement using pcolormesh with time on the x-axis and save to disk.
+
+    The function will try to find a time coordinate inside `ds_plume` by looking
+    for names in `time_coord_names`. If a matching coordinate is found and its
+    length matches the second dimension of the data array, the x-axis will show
+    datetimes. Otherwise the data is plotted without a time axis.
+    """
+
+
+    data = ds_plume["no2_enhancement_interp"].values
+    ny, nx = data.shape
+
+    # find time coordinate
+    times = pd.to_datetime(ds_plume["times_plume"].values)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    # convert to matplotlib datenums and build edges for pcolormesh
+    xnum = mdates.date2num(times.to_pydatetime())
+    # compute edges by midpoints
+    dx = np.diff(xnum)
+    if len(dx) > 0:
+        left = xnum[0] - dx[0] / 2.0
+        right = xnum[-1] + dx[-1] / 2.0
+        xedges = np.concatenate(([left], xnum[:-1] + dx / 2.0, [right]))
+    else:
+        # single column
+        xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+    yedges = np.arange(ny + 1)
+
+    mesh = ax.pcolormesh(xedges, yedges, data, cmap="viridis", shading="auto")
+    # contour needs x coords for proper alignment; use mesh coordinates
+    Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
+    ax.contour(Xc, Yc, mask.astype(int), levels=[0.5], colors="red", linewidths=1.5)
+
+    ax.xaxis_date()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    # show time as hours:minutes:seconds on the x-axis
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    vea_vals = ds_plume["vea"].values 
+    yticks = np.arange(0, len(vea_vals), 3)
+    ax.set_yticks(yticks)
+    ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
+    ax.set_ylabel("VEA / °")
+    ax.set_xlabel("Time (UTC)")
+    fig.autofmt_xdate()
+    mmsi = ds_plume.attrs.get('mmsi', 'unknown_mmsi')
+    ax.set_title(f"NO$_2$ enhancement with plume mask, date: {date}, mmsi: {mmsi}")
+    cbar = fig.colorbar(mesh, ax=ax)
+    cbar.set_label("NO2 enhancement")
+    out_folder = out_dir / f"plume_mask" / f"plumes_{date}"
+    out_folder.mkdir(parents=True, exist_ok=True)
+    try:
+        t_attr = ds_plume.attrs.get('t')
+        tstr = pd.to_datetime(t_attr).strftime('%Y%m%d_%H%M%S') if t_attr is not None else "unknown_time"
+    except Exception:
+        tstr = "unknown_time"
+    fname = out_folder / f"no2_enhancement_with_plume_mask_{date}_{tstr}_{mmsi}.png"
+    fig.savefig(fname, bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_reference_image_with_plume_mask(ref_image, mask, ds_plume, out_dir, date):    
+
+
+    data = ref_image.values
+    ny, nx = data.shape
+
+    # try to obtain time coordinate named 'time_ref' (fall back to other names)
+    
+    times = pd.to_datetime(ds_plume["times_ref"].values)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # build xedges depending on whether times are available
+    xnum = mdates.date2num(times.to_pydatetime())
+    dx = np.diff(xnum)
+    if len(dx) > 0:
+        left = xnum[0] - dx[0] / 2.0
+        right = xnum[-1] + dx[-1] / 2.0
+        xedges = np.concatenate(([left], xnum[:-1] + dx / 2.0, [right]))
+    else:
+        xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+
+
+    # y edges correspond to VEA dimension
+    yedges = np.arange(ny + 1)
+
+    mesh = ax.pcolormesh(xedges, yedges, data, cmap="viridis", shading="auto")
+
+    # contour overlay (align to cell centers)
+    Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
+    ax.contour(Xc, Yc, mask.astype(int), levels=[0.5], colors="red", linewidths=1.5)
+
+    # y ticks from 'vea' coordinate if available
+    if "vea" in ds_plume:
+        vea_vals = ds_plume["vea"].values
+        step = max(1, len(vea_vals) // 8)
+        yticks = np.arange(0, len(vea_vals), step)
+        ax.set_yticks(yticks)
+        ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
+    else:
+        ax.set_yticks(np.arange(0, ny, max(1, ny // 8)))
+
+    ax.xaxis_date()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    ax.set_xlabel("Time (UTC)")
+    ax.set_ylabel("VEA / °")
+    ax.set_title("Reference NO$_2$ variability, date: {}".format(date))
+
+    cbar = fig.colorbar(mesh, ax=ax)
+    cbar.set_label("dNO2")
+
+    # build output folder and filename similar to other plotting function
+    out_base = out_dir / f"reference_quality" / f"plumes_{date}_upwind"
+    sub = "yes_plume" if mask.sum() > 0 else "no_plume"
+    out_folder = out_base / sub
+    out_folder.mkdir(parents=True, exist_ok=True)
+
+    try:
+        t_attr = ds_plume.attrs.get('t')
+        tstr = pd.to_datetime(t_attr).strftime('%Y%m%d_%H%M%S') if t_attr is not None else "unknown_time"
+    except Exception:
+        tstr = "unknown_time"
+    mmsi = ds_plume.attrs.get('mmsi', 'unknown_mmsi')
+    fname = out_folder / f"reference_image_with_plume_mask_{date}_{tstr}_{mmsi}.png"
+    fig.savefig(fname, bbox_inches='tight')
+    plt.close(fig)
