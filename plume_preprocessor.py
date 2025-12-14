@@ -158,200 +158,28 @@ for idx, ship_pass_single in ship_passes.iterrows():
         Path(plumes_out_dir).mkdir(parents=True, exist_ok=True)
         ds_plume.to_netcdf(Path(ship_pass_single['plume_file']), mode="w")
 
-# %%
-import numpy as np
-from scipy import ndimage
-from scipy.stats import norm
-import matplotlib.pyplot as plt
-import pandas as pd
-
-def detect_plume_ztest(
-    image,
-    bg_mean=None,
-    bg_std=None,
-    p_threshold=0.15,
-    min_cluster_size=20,
-    kernel_arm=1,
-    median_kernel_arm=None,
-    connectivity=1,
-    # new options for source-connection checking
-    require_connection=False,
-    time_tol_seconds=30,
-    viewdir_min=8,
-    viewdir_max=18,
-    # option to keep second largest cluster
-    keep_second_largest=False,
-    second_size_threshold=None,
-):
-    """
-    Detect plume pixels using the neighborhood Z-test described (Kuhlmann et al. 2019).
-
-    New parameters:
-    - require_connection: if True, at least one kept cluster must intersect the source region.
-    - t0: central timestamp of source event (datetime or numeric same units as time_grid).
-    - time_grid: 2D array (same shape as image) with timestamp per pixel (datetime64 or numeric seconds).
-    - viewdir_grid: 2D array (same shape as image) with viewing direction per pixel (numeric).
-    - time_tol_seconds: tolerance around t0 (seconds) to define source-region in time.
-    - viewdir_min/viewdir_max: viewing direction window to define source-region.
-    - keep_second_largest: if True, also include second largest cluster when it exceeds second_size_threshold.
-    - second_size_threshold: required size (pixels) for second largest cluster to be kept. If None defaults to min_cluster_size.
-    """
-    kernel_arm=1
-    if image.ndim != 2:
-        raise ValueError("image must be 2D")
-
-    if bg_mean is None:
-        bg_mean = np.nanmean(image)
-    if bg_std is None:
-        bg_std = np.nanstd(image, ddof=0)
-    bg_mean = np.asarray(bg_mean)
-    bg_std = np.asarray(bg_std)
-
-    # build cross-shaped footprint for neighborhood mean
-    size = 2 * kernel_arm + 1
-    footprint = np.zeros((size, size), dtype=bool)
-    c = kernel_arm
-    footprint[c, c] = True
-    for a in range(1, kernel_arm + 1):
-        footprint[c + a, c] = True
-        footprint[c - a, c] = True
-        footprint[c, c + a] = True
-        footprint[c, c - a] = True
-
-    # compute neighborhood mean while ignoring NaNs
-    def local_mean(arr, footprint):
-        def _func(values):
-            vals = values[~np.isnan(values)]
-            return vals.mean() if vals.size else np.nan
-        return ndimage.generic_filter(arr, _func, footprint=footprint, mode="constant", cval=np.nan)
-
-    neigh_mean = local_mean(image, footprint)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        z = (neigh_mean - bg_mean) / bg_std
-    pvals = norm.cdf(-z)
-
-    mask = (pvals <= p_threshold) & (~np.isnan(pvals))
-
-    if median_kernel_arm is None:
-        median_kernel_arm = kernel_arm + 1
-    size_m = 2 * median_kernel_arm + 1
-    footprint_m = np.zeros((size_m, size_m), dtype=bool)
-    cm = median_kernel_arm
-    footprint_m[cm, cm] = True
-    for a in range(1, median_kernel_arm + 1):
-        footprint_m[cm + a, cm] = True
-        footprint_m[cm - a, cm] = True
-        footprint_m[cm, cm + a] = True
-        footprint_m[cm, cm - a] = True
-
-    #mask_smoothed = ndimage.median_filter(mask.astype(np.uint8), footprint=footprint_m, mode="constant", cval=0)
-    #mask = mask_smoothed.astype(bool)
-
-    labeled, ncomp = ndimage.label(mask, structure=ndimage.generate_binary_structure(2, connectivity))
-    if ncomp == 0:
-        return mask  # empty
-    
-    #sort out all clusters smaller than min_cluster_size
-    sizes = ndimage.sum(mask, labeled, range(1, ncomp + 1))
-    keep_labels = [i + 1 for i, s in enumerate(sizes) if s >= min_cluster_size]
-    if not keep_labels:
-        return np.zeros_like(mask, dtype=bool)
-
-    if require_connection:
-            # helper: build source_mask if required
-        source_mask = None
-        # assume times_plume is 1D (columns) and image_row is 1D (rows)
-        times_1d = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
-        t0_dt = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
-
-        # 1D boolean masks
-        time_ok_1d = np.abs(times_1d - t0_dt) <= pd.Timedelta(seconds=time_tol_seconds)
-        vd_1d = np.asarray(ds_plume.image_row)
-        view_ok_1d = (vd_1d >= viewdir_min) & (vd_1d <= viewdir_max)
-
-        # broadcast to image shape: time -> columns, view -> rows
-        try:
-            time_ok = np.broadcast_to(time_ok_1d[None, :], image.shape)   # shape (rows, cols)
-            view_ok = np.broadcast_to(view_ok_1d[:, None], image.shape)   # shape (rows, cols)
-        except Exception:
-            # fallback if broadcast_to fails (shouldn't), use tile
-            time_ok = np.tile(time_ok_1d[None, :], (image.shape[0], 1))
-            view_ok = np.tile(view_ok_1d[:, None], (1, image.shape[1]))
-
-        source_mask = time_ok & view_ok
-
-        if source_mask.shape != image.shape:
-            raise ValueError("time_grid and viewdir_grid must have same shape as image")
-    # filter clusters by min size first
-    mask_filtered = np.isin(labeled, keep_labels)
-
-    kept_sizes = [(lab, s) for lab, s in zip(range(1, ncomp + 1), sizes) if lab in keep_labels]
-    if not kept_sizes:
-        return np.zeros_like(mask, dtype=bool)
-
-    # sort kept clusters by size descending
-    kept_sizes_sorted = sorted(kept_sizes, key=lambda x: x[1], reverse=True)
-    largest_label = kept_sizes_sorted[0][0]
-    largest_size = kept_sizes_sorted[0][1]
-
-    # default final mask = largest cluster
-    final_mask = (labeled == largest_label)
-
-    # if second largest requested, note its label/size
-    sec_label = sec_size = None
-    if len(kept_sizes_sorted) > 1:
-        sec_label, sec_size = kept_sizes_sorted[1]
-    second_threshold = second_size_threshold if second_size_threshold is not None else min_cluster_size
-
-    # if connection to source is required, enforce rules described:
-    if require_connection:
-        # list of kept labels that intersect the source region
-        intersecting_labels = [lab for lab, _ in kept_sizes_sorted if np.any((labeled == lab) & source_mask)]
-
-        # if no kept cluster intersects source region -> no contour
-        if not intersecting_labels:
-            return np.zeros_like(mask, dtype=bool)
-
-        # if largest cluster intersects source -> plot it (and optionally second largest)
-        if largest_label in intersecting_labels:
-            final_mask = (labeled == largest_label)
-            if keep_second_largest and sec_label is not None and sec_size >= second_threshold:
-                final_mask = final_mask | (labeled == sec_label)
-            return final_mask
-
-        # largest cluster does NOT intersect source region, but at least one cluster does
-        # pick the intersecting cluster with largest size (closest/most significant in source region)
-        # build dict for sizes to pick the largest intersecting cluster
-        sizes_dict = {lab: s for lab, s in kept_sizes_sorted}
-        best_intersect_label = max(intersecting_labels, key=lambda L: sizes_dict.get(L, 0))
-
-        # plot the intersecting cluster instead (discard largest)
-        final_mask = (labeled == best_intersect_label)
-
-        # if keep_second_largest requested, also include the original largest cluster
-        if keep_second_largest:
-            final_mask = final_mask | (labeled == largest_label)
-
-        return final_mask
-
-    # if require_connection is False: keep previous behavior (largest, optionally second largest)
-    if keep_second_largest and sec_label is not None and sec_size >= second_threshold:
-        final_mask = final_mask | (labeled == sec_label)
-
-    return final_mask
 
 
-import xarray as xr
 for idx, row in ship_passes.iterrows():
     plume_file = row['plume_file']
     try:
         ds_plume = xr.open_dataset(plume_file)
         plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
         if plume_found:
-            mask = detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.15, min_cluster_size=5, connectivity=1, kernel_arm = 1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
+            # prefer interpolated enhancement, fall back to c_back if missing
+            if 'no2_enhancement_interp' in ds_plume.variables:
+                varname = 'no2_enhancement_interp'
+            elif 'no2_enhancement_c_back' in ds_plume.variables:
+                varname = 'no2_enhancement_c_back'
+            else:
+                print(f"{plume_file}: no enhancement variable found; skipping")
+                ds_plume.close()
+                continue
+
+            arr = ds_plume[varname].values
+            mask = SEICOR.plumes.detect_plume_ztest(arr, p_threshold=0.15, min_cluster_size=5, connectivity=1, kernel_arm=1, require_connection=True, keep_second_largest=False, second_size_threshold=100)
             plt.figure(figsize=(10, 6))
-            plt.imshow(ds_plume["no2_enhancement_interp"].values, origin="lower", aspect="auto", cmap="viridis")
+            plt.imshow(arr, origin="lower", aspect="auto", cmap="viridis")
             plt.contour(mask.astype(int), levels=[0.5], colors="red", linewidths=1.5, origin="lower")
             plt.title("No2 enhancement with detected plume pixels")
             os.makedirs(out_dir / f"plume_mask" / f"plumes_{date}0", exist_ok=True)
@@ -787,8 +615,6 @@ if settings["Plotting"]["generate_plots"]:
 import xarray as xr 
 import pandas as pd
 import shutil
-import concurrent.futures
-from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 #load median wind dataset
 median_wind_file = weather_stations_dir / f"Median_winddata" / f"median_winddata_hourly.csv"
@@ -842,128 +668,132 @@ df_all_ship_passes_filtered = df_all_ship_passes_filtered.assign(
     median_wind_dir=ship_hour_keys.map(median_dir_lookup),
 )
 # %%
-def _process_ship_pass_task(task):
-    """Worker function to process a single ship_pass task.
-
-    task: tuple (idx, row_dict)
-    Returns: dict with status info
-    """
-    import xarray as xr
-    import shutil
-    from pathlib import Path
-    import numpy as _np
-    import SEICOR.wind
-    idx, row = task
+for idx, ship_pass in df_all_ship_passes_filtered.iterrows():
     try:
-        ship_pass = row
         stored = ship_pass.get("plume_file", None)
-        if stored is None:
-            return {"idx": idx, "status": "no_plume_file"}
         fn = Path(stored).name
-        date = pd.to_datetime(ship_pass['Closest_Impact_Measurement_Time']).strftime('%y%m%d')
+        date = ship_pass['Closest_Impact_Measurement_Time'].strftime('%y%m%d')
         out_dir = Path(f"Q:\\BREDOM\\SEICOR\\plumes\\plumes_{date}")
         plume_file = out_dir / fn
         ds_plume = xr.open_dataset(plume_file)
         plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
-        if not plume_found:
-            return {"idx": idx, "status": "no_plume_found"}
+        if plume_found:
+            rel_wind_speed, rel_wind_dir = SEICOR.wind.compute_relative_wind(ship_pass['Mean_Speed'], ship_pass['Mean_Course'], ship_pass['median_wind_speed'], ship_pass['median_wind_dir'])
 
-        rel_wind_speed, rel_wind_dir = SEICOR.wind.compute_relative_wind(ship_pass.get('Mean_Speed'), ship_pass.get('Mean_Course'), ship_pass.get('median_wind_speed'), ship_pass.get('median_wind_dir'))
+            #copy the respective plume_detection_file to a separate folder for further analysis
+            image_path = Path(f"Q:\\BREDOM\\SEICOR\\analysis\\plume_detection\\plumes_{date}\\ship_yes")
+            dst_path = Path(r"Q:\BREDOM\SEICOR\analysis\wind_filtered_plots")
 
-        image_path = Path(f"Q:\\BREDOM\\SEICOR\\analysis\\plume_detection\\plumes_{date}\\ship_yes")
-        dst_path = Path(r"Q:\BREDOM\SEICOR\analysis\wind_filtered_plots")
+            # Prepare candidate filename patterns to handle variations in how images were saved
+            t = pd.to_datetime(ds_plume.attrs.get('t'))
+            time_nounder = t.strftime('%Y%m%d_%H%M%S')
+            mmsi = ds_plume.attrs.get('mmsi')
 
-        t = pd.to_datetime(ds_plume.attrs.get('t'))
-        time_nounder = t.strftime('%Y%m%d_%H%M%S')
-        mmsi = ds_plume.attrs.get('mmsi')
+            candidates = [
+                f"plume_{time_nounder}_{mmsi}_mask_plume.png",
+                f"plume_{time_nounder}_{mmsi}_mask_ship.png",
+            ]
 
-        candidates = [
-            f"plume_{time_nounder}_{mmsi}_mask_plume.png",
-            f"plume_{time_nounder}_{mmsi}_mask_ship.png",
-        ]
-
-        found = False
-        for candidate in candidates:
-            original_image_path = image_path / candidate
-            if original_image_path.exists():
-                try:
-                    dst_path.mkdir(parents=True, exist_ok=True)
-                    shutil.copy(original_image_path, dst_path / candidate)
-
-                    # classify by relative wind speed
-                    rel_gt_dir = dst_path / "rel_wind_gt2"
-                    rel_lt_dir = dst_path / "rel_wind_lt2"
-                    rel_gt_dir.mkdir(parents=True, exist_ok=True)
-                    rel_lt_dir.mkdir(parents=True, exist_ok=True)
-
+            found = False
+            for candidate in candidates:
+                original_image_path = image_path / candidate
+                if original_image_path.exists():
                     try:
-                        rws = float(rel_wind_speed)
-                    except Exception:
-                        rws = None
+                        shutil.copy(original_image_path, dst_path / candidate)
+                        print(f"Copied to {dst_path / candidate}")
+                        # also copy into relative-wind-classified subfolders
+                        rel_gt_dir = dst_path / "rel_wind_gt2"
+                        rel_lt_dir = dst_path / "rel_wind_lt2"
+                        rel_gt_dir.mkdir(parents=True, exist_ok=True)
+                        rel_lt_dir.mkdir(parents=True, exist_ok=True)
 
-                    if rws is not None and (not _np.isnan(rws)):
-                        if rws > 2.0:
-                            shutil.copy(original_image_path, rel_gt_dir / candidate)
+                        try:
+                            rws = float(rel_wind_speed)
+                        except Exception:
+                            rws = None
+
+                        if rws is None or np.isnan(rws):
+                            # unknown relative wind: leave only in main dst
+                            pass
+                        elif rws > 2.0:
+                            try:
+                                shutil.copy(original_image_path, rel_gt_dir / candidate)
+                                print(f"Copied to {rel_gt_dir}")
+                            except Exception as e:
+                                print(f"Failed to copy to {rel_gt_dir}: {e}")
                         else:
-                            shutil.copy(original_image_path, rel_lt_dir / candidate)
+                            try:
+                                shutil.copy(original_image_path, rel_lt_dir / candidate)
+                                print(f"Copied to {rel_lt_dir}")
+                            except Exception as e:
+                                print(f"Failed to copy to {rel_lt_dir}: {e}")
 
-                    # classify by wind direction relative to ship
-                    try:
-                        wind_from = float(ship_pass.get('median_wind_dir'))
-                        ship_course = float(ship_pass.get('Mean_Course'))
-                    except Exception:
-                        wind_from = None
-                        ship_course = None
+                        # Also classify by wind direction relative to ship course
+                        try:
+                            wind_from = float(ship_pass.get('median_wind_dir'))
+                            ship_course = float(ship_pass.get('Mean_Course'))
+                        except Exception:
+                            wind_from = None
+                            ship_course = None
 
-                    if wind_from is not None and ship_course is not None:
-                        wind_to = (wind_from + 180.0) % 360.0
-                        def angdiff(a, b):
-                            d = (a - b + 180.0) % 360.0 - 180.0
-                            return abs(d)
-                        thresh_deg = 15.0
-                        same_dir = angdiff(wind_to, ship_course) <= thresh_deg
-                        against_dir = angdiff(wind_from, ship_course) <= thresh_deg
+                        if wind_from is not None and ship_course is not None:
+                            # wind_to is the direction the wind is going TO (meteorological from + 180)
+                            wind_to = (wind_from + 180.0) % 360.0
 
-                        same_dir_dir = dst_path / "wind_same_dir"
-                        against_dir_dir = dst_path / "wind_against_dir"
-                        same_dir_dir.mkdir(parents=True, exist_ok=True)
-                        against_dir_dir.mkdir(parents=True, exist_ok=True)
+                            def angdiff(a, b):
+                                d = (a - b + 180.0) % 360.0 - 180.0
+                                return abs(d)
 
-                        if same_dir:
-                            shutil.copy(original_image_path, same_dir_dir / candidate)
-                        elif against_dir:
-                            shutil.copy(original_image_path, against_dir_dir / candidate)
+                            thresh_deg = 15.0
+                            same_dir = angdiff(wind_to, ship_course) <= thresh_deg
+                            against_dir = angdiff(wind_from, ship_course) <= thresh_deg
 
-                    found = True
-                    break
-                except Exception as e:
-                    return {"idx": idx, "status": "copy_failed", "error": str(e)}
+                            same_dir_dir = dst_path / "wind_same_dir"
+                            against_dir_dir = dst_path / "wind_against_dir"
+                            against_dir_dir_low = dst_path / "wind_against_dir_low_speed"
+                            same_dir_dir.mkdir(parents=True, exist_ok=True)
+                            against_dir_dir.mkdir(parents=True, exist_ok=True)
+                            against_dir_dir_low.mkdir(parents=True, exist_ok=True)
 
-        if not found:
-            return {"idx": idx, "status": "no_image_found", "tried": candidates}
+                            if same_dir:
+                                try:
+                                    shutil.copy(original_image_path, same_dir_dir / candidate)
+                                    print(f"Copied to {same_dir_dir}")
+                                except Exception as e:
+                                    print(f"Failed to copy to {same_dir_dir}: {e}")
+                            elif against_dir:
+                                # Only classify as 'against' when relative wind speed is sufficiently large
+                                try:
+                                    rws_check = float(rel_wind_speed)
+                                except Exception:
+                                    rws_check = None
 
-        return {"idx": idx, "status": "ok", "image": str(plume_file)}
+                                if rws_check is None or np.isnan(rws_check):
+                                    print(f"Against-wind detected but relative wind unknown; skipping against_dir copy for {candidate}")
+                                elif rws_check <= 2.0:
+                                    try:
+                                        shutil.copy(original_image_path, against_dir_dir_low / candidate)
+                                        print(f"Copied to {against_dir_dir_low}")
+                                    except Exception as e:
+                                        print(f"Failed to copy to {against_dir_dir_low}: {e}")
+                                else:
+                                    print(f"Against-wind detected but relative wind {rws_check:.2f} < 2.0 m/s; skipping against_dir copy for {candidate}")
 
+                        found = True
+                        break
+                    except Exception as e:
+                        print(f"Failed to copy {original_image_path} -> {dst_path / candidate}: {e}")
+                        found = True
+                        break
+
+            if not found:
+                print(f"No plume image found for plume file {plume_file}. Tried: {candidates}")
+            pass
+        elif not plume_found:
+            print("no plume found")
     except Exception as e:
-        return {"idx": idx, "status": "error", "error": str(e)}
-
-
-# Run processing in parallel using a process pool
-tasks = [(idx, row.to_dict()) for idx, row in df_all_ship_passes_filtered.iterrows()]
-
-def run_ship_passes_parallel(tasks_list, max_workers=10):
-    """Run the ship-pass tasks in parallel and return results list."""
-    with ProcessPoolExecutor(max_workers=max_workers) as exe:
-        results = list(exe.map(_process_ship_pass_task, tasks_list))
-    return results
-
-
-if __name__ == '__main__':
-    if tasks:
-        results = run_ship_passes_parallel(tasks, max_workers=1)
-        for r in results:
-            if r.get("status") not in ("ok", "no_plume_found"):
-                print(f"Task result: {r}")
+        pass
+        print(f"Could not open plume file {plume_file}: {e}")
 
 
 # %%
