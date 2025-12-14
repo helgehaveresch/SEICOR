@@ -169,7 +169,18 @@ for idx, row in ship_passes.iterrows():
         ds_plume = xr.open_dataset(plume_file)
         plume_found = ds_plume.attrs.get("plume_or_ship_found", "False") == "True"
         if plume_found:
-            mask = SEICOR.plumes.detect_plume_ztest(ds_plume["no2_enhancement_interp"].values, p_threshold=0.25, min_cluster_size=5, connectivity=1, kernel_arm = 1, require_connection=True, ds_plume=ds_plume, keep_second_largest=False, second_size_threshold=100)
+            # Prefer interpolated enhancement if available, else fall back to c_back.
+            mask = SEICOR.plumes.detect_plume_ztest(
+                ds_plume["no2_enhancement_interp"].values,
+                p_threshold=0.25,
+                min_cluster_size=5,
+                connectivity=1,
+                kernel_arm=1,
+                require_connection=True,
+                ds_plume=ds_plume,
+                keep_second_largest=False,
+                second_size_threshold=100,
+            )
             SEICOR.plotting.plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date)
     except Exception as e:
         print(f"Could not open plume file {plume_file}: {e}")
