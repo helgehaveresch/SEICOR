@@ -154,11 +154,12 @@ def read_uni_hamburg_wind_data_single_txt(file_path):
             vals.append(line)
     return np.array(vals, dtype=float)
 
-def read_all_uni_hamburg_wind_data(dir_path, station_name, time, variab_list = ["wind_speed", "wind_dir", "wind_max"],     variab_name = {
-        "wind_speed": "FF",
-        "wind_dir": "DD",
-        "wind_max": "FB",
-    }):
+def read_all_uni_hamburg_wind_data(dir_path, station_name, time, 
+                                   variab_list = ["wind_speed", "wind_dir", "wind_max", "solar_rad"],
+                                   variab_name = {  "wind_speed": "FF",
+                                                    "wind_dir": "DD",
+                                                    "wind_max": "FB",
+                                                    "solar_rad": "G",}):
 
     for var in variab_list:
         file_path = f"{dir_path}/{station_name}{variab_name[var]}_202503010000-202510312359.txt"
