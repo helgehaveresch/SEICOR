@@ -393,6 +393,14 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         print('no NO2 enhancement variable (interp or c_back) in dataset')
         return ds_plume
 
+    # record which enhancement variable will be used and create an alias
+    ds_plume.attrs["enhancement_var_used"] = varname
+    if 'no2_enhancement_interp' not in ds_plume:
+        try:
+            ds_plume = ds_plume.assign(no2_enhancement_interp=ds_plume['no2_enhancement_c_back'])
+        except Exception:
+            pass
+
     slice_rows = slice(8,20)
     tol = pd.Timedelta("50s")
     times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
