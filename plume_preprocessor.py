@@ -143,8 +143,10 @@ df_ais, filtered_ship_groups, maskedout_groups, ship_passes = SEICOR.ais.filter_
 ship_passes = SEICOR.in_situ.add_wind_to_ship_passes(ship_passes, df_insitu)
 ship_passes = SEICOR.video_camera.assign_video_images_to_ship_pass(ship_passes, img_dir, date)
 ship_passes = SEICOR.plumes.add_plume_file_paths_to_ship_passes(ship_passes, plumes_out_dir)
-Path(ship_passes_out_dir).mkdir(parents=True, exist_ok=True)
-ship_passes.to_csv(ship_passes_out_dir / f"ship_passes_{date}.csv")
+# ensure a column exists to record whether a plume or ship was found (default 'False')
+if 'plume_or_ship_found' not in ship_passes.columns:
+    ship_passes['plume_or_ship_found'] = 'False'
+
 
 #%% Process each ship pass
 for idx, ship_pass_single in ship_passes.iterrows():
@@ -161,7 +163,13 @@ for idx, ship_pass_single in ship_passes.iterrows():
             mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=30, ds_plume=ds_plume)
             SEICOR.plotting.plot_reference_image_with_plume_mask(ref_image, mask, ds_plume, out_dir, date)
         ds_plume.to_netcdf(Path(ship_pass_single['plume_file']), mode="w")
-
+        # record result back into ship_passes dataframe so it can be saved
+        try:
+            ship_passes.at[idx, 'plume_or_ship_found'] = ds_plume.attrs.get('plume_or_ship_found', 'False')
+        except Exception:
+            pass
+Path(ship_passes_out_dir).mkdir(parents=True, exist_ok=True)
+ship_passes.to_csv(ship_passes_out_dir / f"ship_passes_{date}.csv")
 # %%
 for idx, row in ship_passes.iterrows():
     plume_file = row['plume_file']
@@ -184,6 +192,9 @@ for idx, row in ship_passes.iterrows():
             SEICOR.plotting.plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date)
     except Exception as e:
         print(f"Could not open plume file {plume_file}: {e}")
+# after checking/saving plume figures, persist updated ship_passes (with plume flag)
+Path(ship_passes_out_dir).mkdir(parents=True, exist_ok=True)
+ship_passes.to_csv(ship_passes_out_dir / f"ship_passes_{date}.csv", index=False)
 #%%
 #import xarray as xr
 #for idx, row in ship_passes.iterrows():
