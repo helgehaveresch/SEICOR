@@ -854,7 +854,7 @@ def plot_ship_pass_subplot_v1(
         plt.show()
 
 def plot_ship_pass_subplot_v2(
-        ds_plume, passing_ship, no2_out_dir, lat1, lon1, lat2, lon2, save=False
+        ds_plume, passing_ship, img_dir, no2_out_dir, lat1, lon1, lat2, lon2, save=False
     ):
 
     # Try to find the corresponding image (treat explicit 'no image' as missing)
@@ -935,6 +935,7 @@ def plot_ship_pass_subplot_v2(
 
     # Video image
     ax2 = fig.add_subplot(gs[0, 2])
+    img_file = (img_dir / img_file)
     if img_file:
         fname = os.path.basename(img_file)
         fdir = os.path.dirname(img_file)
@@ -956,7 +957,7 @@ def plot_ship_pass_subplot_v2(
                         data = zf.read(member)
                         img = Image.open(BytesIO(data))
                         ax2.imshow(img)
-                        ax2.set_title(f"Video image ({os.path.basename(zip_candidate)})")
+                        ax2.set_title(f"Video image {fname}")
                         ax2.axis("off")
                         shown = True
             except Exception:
@@ -1191,14 +1192,14 @@ def plot_ship_pass_subplot_v2(
     else:
         plt.show()
 
-def plot_no2_enhancements_for_all_ships_full_overview(path_ship_passes, out_dir, lat1, lon1, lat2, lon2, save=False):
+def plot_no2_enhancements_for_all_ships_full_overview(path_ship_passes, img_dir, out_dir, lat1, lon1, lat2, lon2, save=False):
     ship_passes = pd.read_csv(path_ship_passes, index_col=0, parse_dates=True)
     for idx, ship_pass_single in ship_passes.iterrows():
         if not os.path.isfile(ship_pass_single['plume_file']):
             print(f"Plume file {ship_pass_single['plume_file']} does not exist. Skipping.")
             continue
         ds_plume = xr.open_dataset(ship_pass_single['plume_file'])
-        plot_ship_pass_subplot_v2(ds_plume, ship_pass_single, out_dir, lat1, lon1, lat2, lon2, save=True)
+        plot_ship_pass_subplot_v2(ds_plume, ship_pass_single, img_dir, out_dir, lat1, lon1, lat2, lon2, save=True)
 
 
 
