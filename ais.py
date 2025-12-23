@@ -414,6 +414,15 @@ def filter_ship_passes(df_ais, ship_groups, filtered_ship_groups, start_time, en
                         length_m = np.nan
                         print(f"Warning: min_idx={min_idx} out-of-range for MMSI {mmsi}; using NaN")
 
+                    # compute geodesic distance from ship position at pass to instrument location (meters)
+                    try:
+                        inst_lat, inst_lon = float(instrument_location[0]), float(instrument_location[1])
+                        pass_lat = float(pass_lats.iloc[min_idx])
+                        pass_lon = float(pass_lons.iloc[min_idx])
+                        distance_to_instrument_m = geodesic((pass_lat, pass_lon), (inst_lat, inst_lon)).meters
+                    except Exception:
+                        distance_to_instrument_m = np.nan
+
                     ship_passes.append({
                         "MMSI": mmsi,
                         "UTC_Time": pass_times[min_idx],
@@ -425,6 +434,7 @@ def filter_ship_passes(df_ais, ship_groups, filtered_ship_groups, start_time, en
                         "Latitude": pass_lats.iloc[min_idx],
                         "Longitude": pass_lons.iloc[min_idx],
                         "Distance": pass_dists[min_idx],
+                        "Distance_to_IMPACT_m": distance_to_instrument_m,
                         "Draught_in_m": draught,
                         "Length_in_m": length_m,
                         "ship_category": ship_category
