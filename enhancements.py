@@ -15,7 +15,7 @@ def rolling_background_enh(ds, window_size=500):
 def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passes,
                                     window_minutes=(1, 3), ref_search_minutes=60,
                                     ref_window_minutes=1, ref_min_span_seconds=30,
-                                    ref_min_count=3, do_lp=False, df_lp=None):
+                                    ref_min_count=30, do_lp=False, df_lp=None):
     """Subtracts background for a single ship pass (row from ship_passes).
 
     This variant enforces minimum quality for the chosen reference window: it must
@@ -153,7 +153,12 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
 
     return ds
 
-def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times, ship_passes, window_minutes=(1, 3), ref_search_minutes=60, ref_window_minutes=1, ref_min_span_seconds=40, ref_min_count=100, do_lp=False, df_lp = None):
+def upwind_downwind_interp_background_enh(ds, row, 
+                                          ds_impact, measurement_times, 
+                                          ship_passes, window_minutes=(1, 3), 
+                                          ref_search_minutes=60, ref_window_minutes=1, 
+                                          ref_min_span_seconds=30, ref_min_count=30, 
+                                          do_lp=False, df_lp = None):
     """
     Subtracts background for a single ship pass (row from ship_passes).
     Returns: dict with keys: mmsi, t, no2_data, times_window, window, window_ref, ref_found
