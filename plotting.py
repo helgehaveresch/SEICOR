@@ -1008,7 +1008,7 @@ def plot_ship_pass_subplot_v2(
 
 
     # Wind arrow in upper right
-    wind_dir_rad = np.deg2rad(passing_ship['wind_dir'])
+    wind_dir_rad = np.deg2rad((passing_ship['wind_dir']+180)%360)
     wind_speed_mean = passing_ship['wind_speed']
     wind_arrow_length = 0.01
     wind_start_lat = max_lat - lat_margin - wind_arrow_length * np.cos(wind_dir_rad) / 2
