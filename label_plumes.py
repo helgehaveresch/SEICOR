@@ -21,6 +21,10 @@ import pandas as pd
 import numpy as np
 import xarray as xr
 import sys
+import shutil
+import re
+import sys
+sys.path.append(r"C:\Users\hhave\Documents\Promotion\scripts")
 #%%
 
 class LabelGUI:
@@ -217,6 +221,893 @@ def count_ship_passes(ship_pass_dir: Path):
     print(f'Total ship_pass rows (CSV rows): {total_rows}')
     print(f'Total plume_useful == True: {total_useful}')
     print(f'Total plume_or_ship_found == True: {total_found}')
+
+
+def count_useful_plumes_by_relwind(ship_pass_dir: Path, rel_wind_speed_thresh: float = 1.5):
+    """Count plume rows across ship-pass CSVs where `plume_useful==True` and
+    `rel_wind_speed > rel_wind_speed_thresh` and `rel_wind_dir` falls into
+    either (57.3, 147.3) or (237.3, 327.3).
+
+    Additionally counts the number of `plume_useful==True` rows that DO NOT
+    fulfill the wind condition (including rows with missing/non-numeric wind
+    values). Returns a tuple:
+
+        (per_file_match, total_match, per_file_nonmatch, total_nonmatch)
+
+    where `per_file_match` and `per_file_nonmatch` are dicts mapping CSV path
+    -> counts.
+    """
+    ship_pass_dir = Path(ship_pass_dir)
+    if not ship_pass_dir.exists():
+        print('ship_pass_dir does not exist, cannot count:', ship_pass_dir)
+        return {}, 0, {}, 0
+
+    per_file_match = {}
+    per_file_nonmatch = {}
+    total_match = 0
+    total_nonmatch = 0
+    csvs = sorted(ship_pass_dir.glob('*.csv'))
+    for csvf in csvs:
+        try:
+            df = pd.read_csv(csvf)
+        except Exception as e:
+            print(f'Failed to read CSV {csvf}: {e}')
+            continue
+
+        if 'plume_useful' not in df.columns:
+            per_file_match[str(csvf)] = 0
+            per_file_nonmatch[str(csvf)] = 0
+            continue
+
+        # normalize plume_useful to boolean-like mask
+        try:
+            mask_useful = df['plume_useful'].astype(str).str.strip().str.lower().isin(['true', '1', 't', 'yes'])
+        except Exception:
+            mask_useful = pd.Series(False, index=df.index)
+
+        n_useful = int(mask_useful.sum())
+        if n_useful == 0:
+            per_file_match[str(csvf)] = 0
+            per_file_nonmatch[str(csvf)] = 0
+            continue
+
+        sel = df[mask_useful].copy()
+        # coerce numeric columns
+        sel['rel_wind_speed'] = pd.to_numeric(sel.get('rel_wind_speed', pd.Series([None] * len(sel))), errors='coerce')
+        sel['rel_wind_dir'] = pd.to_numeric(sel.get('rel_wind_dir', pd.Series([None] * len(sel))), errors='coerce')
+
+        cond = (sel['rel_wind_speed'] > rel_wind_speed_thresh) & (
+            ((sel['rel_wind_dir'] > 100.3) & (sel['rel_wind_dir'] < 104.3)) |
+            ((sel['rel_wind_dir'] > 280.3) & (sel['rel_wind_dir'] < 284.3))
+        )
+
+        try:
+            count_match = int(cond.sum())
+        except Exception:
+            count_match = 0
+
+        count_nonmatch = n_useful - count_match
+
+        per_file_match[str(csvf)] = count_match
+        per_file_nonmatch[str(csvf)] = count_nonmatch
+        total_match += count_match
+        total_nonmatch += count_nonmatch
+
+    print('Per-file matching counts:')
+    for k, v in per_file_match.items():
+        print(f'  {k}: {v}')
+    print('Per-file non-matching (useful but not meeting wind condition):')
+    for k, v in per_file_nonmatch.items():
+        print(f'  {k}: {v}')
+
+    print('Total matching rows across CSVs:', total_match)
+    print('Total non-matching useful rows across CSVs:', total_nonmatch)
+    return per_file_match, total_match, per_file_nonmatch, total_nonmatch
+
+
+def count_useful_plumes_by_relwind_and_copy(ship_pass_dir: Path, plots_dir: Path, dst_dir: Path,
+                                           rel_wind_speed_thresh: float = 1.5, dry_run: bool = False):
+    """Find useful plumes meeting the relative-wind filter and copy their
+    corresponding PNGs (from `plots_dir`) into `dst_dir`.
+
+    Mapping from CSV `plume_file` entries (example:
+    `plume_017_t_20250424_072159_mmsi_636017000.nc`) to plot filenames
+    (example: `plume_t_20250424_072159_017_mmsi_636017000.png`) is performed by
+    reordering filename parts. If the exact mapped filename is not found, a
+    fallback recursive search for matching date + mmsi is attempted.
+
+    Returns a tuple `(copied_files, missing_files)` where each is a list of
+    destination paths (strings) or missing source candidates.
+    """
+    ship_pass_dir = Path(ship_pass_dir)
+    plots_dir = Path(plots_dir)
+    dst_dir = Path(dst_dir)
+    if not ship_pass_dir.exists():
+        print('ship_pass_dir does not exist, cannot count/copy:', ship_pass_dir)
+        return [], []
+    if not plots_dir.exists():
+        print('plots_dir does not exist, cannot find images:', plots_dir)
+        return [], []
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = []
+    missing = []
+
+    csvs = sorted(ship_pass_dir.glob('*.csv'))
+    for csvf in csvs:
+        try:
+            df = pd.read_csv(csvf)
+        except Exception as e:
+            print(f'Failed to read CSV {csvf}: {e}')
+            continue
+
+        if 'plume_useful' not in df.columns:
+            continue
+
+        # select rows marked useful
+        useful = df[df['plume_useful'].astype(str).str.lower().isin(['true','1','t','yes'])]
+        if useful.empty:
+            continue
+
+        # coerce numeric columns
+        useful['rel_wind_speed'] = pd.to_numeric(useful.get('rel_wind_speed', pd.Series([None] * len(useful))), errors='coerce')
+        useful['rel_wind_dir'] = pd.to_numeric(useful.get('rel_wind_dir', pd.Series([None] * len(useful))), errors='coerce')
+
+        # apply wind condition
+        #mask = (useful['rel_wind_speed'] > rel_wind_speed_thresh) & (
+        #    ((useful['rel_wind_dir'] > 57.3) & (useful['rel_wind_dir'] < 147.3)) |
+        #    ((useful['rel_wind_dir'] > 237.3) & (useful['rel_wind_dir'] < 327.3))
+        #)
+        mask = (useful['rel_wind_speed'] > rel_wind_speed_thresh) & (
+            ((useful['rel_wind_dir'] > 100.3) & (useful['rel_wind_dir'] < 104.3)) |
+            ((useful['rel_wind_dir'] > 280.3) & (useful['rel_wind_dir'] < 284.3))
+        )
+
+        sel = useful[mask]
+        if sel.empty:
+            continue
+
+        for _, row in sel.iterrows():
+            pf = row.get('plume_file', None)
+            if pf is None or (isinstance(pf, float) and np.isnan(pf)):
+                missing.append({'csv': str(csvf), 'reason': 'missing plume_file', 'row': int(row.name)})
+                continue
+
+            # derive expected image filename from plume_file name
+            pfn = Path(str(pf)).name
+            stem = Path(pfn).stem
+            parts = stem.split('_')
+            img_name = None
+            # expected pattern: plume_<idx>_t_<YYYYMMDD>_<HHMMSS>_mmsi_<MMSI>
+            if len(parts) >= 7 and parts[0] == 'plume' and parts[2] == 't':
+                try:
+                    idx = parts[1]
+                    date = parts[3]
+                    time = parts[4]
+                    # parts[5] should be 'mmsi'
+                    mmsi = parts[6]
+                    img_name = f"plume_t_{date}_{time}_{idx}_mmsi_{mmsi}.png"
+                except Exception:
+                    img_name = None
+
+            src_img = None
+            if img_name is not None:
+                candidate = plots_dir / img_name
+                if candidate.exists():
+                    src_img = candidate
+
+            # fallback: search for any png containing date and mmsi
+            if src_img is None:
+                # attempt extract date and mmsi via regex
+                m = re.search(r'(20\d{6})_(\d{6})', stem)
+                mmsi_m = re.search(r'mmsi_(\d+)', stem)
+                date = m.group(1) if m else None
+                time = m.group(2) if m else None
+                mmsi = mmsi_m.group(1) if mmsi_m else None
+                candidates = []
+                if date and mmsi:
+                    pattern = f"*{date}*{mmsi}*.png"
+                    candidates = list(plots_dir.rglob(pattern))
+                if not candidates:
+                    # last resort: search by mmsi only
+                    if mmsi:
+                        candidates = list(plots_dir.rglob(f"*{mmsi}*.png"))
+
+                if candidates:
+                    # prefer one whose name contains the exact time+date+idx ordering if possible
+                    src_img = candidates[0]
+
+            if src_img is None:
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': 'image not found'})
+                continue
+
+            dst_path = dst_dir / src_img.name
+            if dry_run:
+                print(f'DRY RUN: would copy {src_img} -> {dst_path}')
+                copied.append(str(dst_path))
+                continue
+
+            try:
+                shutil.copy2(src_img, dst_path)
+                copied.append(str(dst_path))
+            except Exception as e:
+                print(f'Failed to copy {src_img} to {dst_path}: {e}')
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': f'copy failed: {e}'})
+
+    print(f'Copied {len(copied)} images to {dst_dir}; {len(missing)} missing/unresolved')
+    return copied, missing
+
+
+def count_useful_plumes_wind_faster_and_copy(ship_pass_dir: Path, plots_dir: Path, dst_dir: Path,
+                                            angle_tolerance: float = 10.0, speed_diff_thresh: float = 1.0,
+                                            dry_run: bool = False):
+    """Select useful plumes where the in-situ wind direction (`wind_dir`) is
+    approximately opposite to the ship `Mean_Course` (within +/- `angle_tolerance`)
+    and the in-situ wind speed (`wind_speed`) is at least `speed_diff_thresh`
+    m/s greater than the ship speed (`Mean_Speed`). Copies matching plume PNGs
+    from `plots_dir` into `dst_dir` using the same filename mapping logic as
+    the other helpers. Returns (copied, missing).
+    """
+    ship_pass_dir = Path(ship_pass_dir)
+    plots_dir = Path(plots_dir)
+    dst_dir = Path(dst_dir)
+    if not ship_pass_dir.exists():
+        print('ship_pass_dir does not exist, cannot count/copy:', ship_pass_dir)
+        return [], []
+    if not plots_dir.exists():
+        print('plots_dir does not exist, cannot find images:', plots_dir)
+        return [], []
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = []
+    missing = []
+
+    wind_dir_cols = ['wind_dir']
+    wind_speed_cols = ['wind_speed']
+    ship_dir_cols = ['Mean_Course']
+    ship_speed_cols = ['Mean_Speed']
+
+    def get_first_col(series_df, candidates):
+        for c in candidates:
+            if c in series_df.columns:
+                return series_df[c]
+        return pd.Series([np.nan] * len(series_df), index=series_df.index)
+
+    def ang_diff(a, b):
+        try:
+            return float(np.abs(((a - b + 180.0) % 360.0) - 180.0))
+        except Exception:
+            return np.nan
+
+    csvs = sorted(ship_pass_dir.glob('*.csv'))
+    for csvf in csvs:
+        try:
+            df = pd.read_csv(csvf)
+        except Exception as e:
+            print(f'Failed to read CSV {csvf}: {e}')
+            continue
+
+        if 'plume_useful' not in df.columns:
+            continue
+
+        useful = df[df['plume_useful'].astype(str).str.lower().isin(['true','1','t','yes'])]
+        if useful.empty:
+            continue
+
+        wdir = pd.to_numeric(get_first_col(useful, wind_dir_cols), errors='coerce')
+        wspd = pd.to_numeric(get_first_col(useful, wind_speed_cols), errors='coerce')
+        scourse = pd.to_numeric(get_first_col(useful, ship_dir_cols), errors='coerce')
+        sspeed = pd.to_numeric(get_first_col(useful, ship_speed_cols), errors='coerce')
+
+        # check wind_dir opposite to Mean_Course: angular difference to (Mean_Course + 180)
+        ship_opposite = (scourse + 180.0) % 360.0
+        diff = ang_diff(wdir, ship_opposite)
+
+        mask = (diff <= angle_tolerance) & (wspd >= (sspeed + speed_diff_thresh))
+
+        sel = useful[mask.fillna(False)]
+        if sel.empty:
+            continue
+
+        for _, row in sel.iterrows():
+            pf = row.get('plume_file', None)
+            if pf is None or (isinstance(pf, float) and np.isnan(pf)):
+                missing.append({'csv': str(csvf), 'reason': 'missing plume_file', 'row': int(row.name)})
+                continue
+
+            pfn = Path(str(pf)).name
+            stem = Path(pfn).stem
+            parts = stem.split('_')
+            img_name = None
+            if len(parts) >= 7 and parts[0] == 'plume' and parts[2] == 't':
+                try:
+                    idx = parts[1]
+                    date = parts[3]
+                    time = parts[4]
+                    mmsi = parts[6]
+                    img_name = f"plume_t_{date}_{time}_{idx}_mmsi_{mmsi}.png"
+                except Exception:
+                    img_name = None
+
+            src_img = None
+            if img_name is not None:
+                candidate = plots_dir / img_name
+                if candidate.exists():
+                    src_img = candidate
+
+            if src_img is None:
+                m = re.search(r'(20\d{6})_(\d{6})', stem)
+                mmsi_m = re.search(r'mmsi_(\d+)', stem)
+                date = m.group(1) if m else None
+                time = m.group(2) if m else None
+                mmsi = mmsi_m.group(1) if mmsi_m else None
+                candidates = []
+                if date and mmsi:
+                    pattern = f"*{date}*{mmsi}*.png"
+                    candidates = list(plots_dir.rglob(pattern))
+                if not candidates and mmsi:
+                    candidates = list(plots_dir.rglob(f"*{mmsi}*.png"))
+                if candidates:
+                    src_img = candidates[0]
+
+            if src_img is None:
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': 'image not found'})
+                continue
+
+            dst_path = dst_dir / src_img.name
+            if dry_run:
+                print(f'DRY RUN: would copy {src_img} -> {dst_path}')
+                copied.append(str(dst_path))
+                continue
+
+            try:
+                shutil.copy2(src_img, dst_path)
+                copied.append(str(dst_path))
+            except Exception as e:
+                print(f'Failed to copy {src_img} to {dst_path}: {e}')
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': f'copy failed: {e}'})
+
+    print(f'Copied {len(copied)} images to {dst_dir}; {len(missing)} missing/unresolved')
+    return copied, missing
+
+
+def classify_pasquill(solar_rad, wind_speed):
+    """Return a Pasquill stability class (A..G) based on solar radiation (W/m2)
+    and wind speed (m/s). Uses a simplified mapping of insolation and wind speed
+    to Pasquill-Gifford stability categories.
+    """
+    try:
+        sr = float(solar_rad)
+    except Exception:
+        return 'Unknown'
+    try:
+        ws = float(wind_speed)
+    except Exception:
+        ws = np.nan
+
+    if sr <= 0:
+        # night-time mapping (simple): very light wind -> F, light -> E, stronger -> D
+        if np.isnan(ws):
+            return 'F'
+        if ws < 2:
+            return 'F'
+        if ws < 5:
+            return 'E'
+        return 'D'
+
+    # daytime: classify by insolation strength
+    if sr >= 700:
+        # strong insolation
+        if ws < 2:
+            return 'A'
+        if ws < 5:
+            return 'B'
+        if ws > 5:
+            return 'C'
+    if sr >= 350 and sr < 700:
+        # strong insolation
+        if ws < 2:
+            return 'A'
+        if ws < 3:
+            return 'B'
+        if ws < 5:
+            return 'C'
+        if ws >= 5:
+            return 'D'
+
+    if sr < 350:
+        # moderate insolation
+        if ws < 2:
+            return 'B'
+        if ws < 5:
+            return 'C'
+        if ws >= 5:
+            return 'D'
+
+
+def copy_plumes_by_stability(ship_pass_dir: Path, plots_dir: Path, dst_dir: Path,
+                            rissen_dir_param: str = None, dry_run: bool = False):
+    """Classify useful plumes by Pasquill stability using Rissen hourly
+    solar radiation and the wind speed reported in the ship-pass CSV rows.
+    Copies plume PNGs into subfolders of `dst_dir` named by stability class
+    (A,B,C,D,E,F,Unknown).
+    """
+    ship_pass_dir = Path(ship_pass_dir)
+    plots_dir = Path(plots_dir)
+    dst_dir = Path(dst_dir)
+    if not ship_pass_dir.exists():
+        print('ship_pass_dir does not exist, cannot process:', ship_pass_dir)
+        return [], []
+    if not plots_dir.exists():
+        print('plots_dir does not exist, cannot find images:', plots_dir)
+        return [], []
+
+    # attempt to get Rissen hourly solar_rad from SEICOR.weatherdata if available
+    try:
+        from SEICOR import weatherdata_rad as wd
+        rissen = wd.rissen_hourly if hasattr(wd, 'rissen_hourly') else None
+        
+    except Exception as e:
+        rissen = None
+        
+        print(f"Error importing weatherdata_rad: {e}," )
+
+    if (rissen is None or (hasattr(rissen, 'empty') and rissen.empty)) and rissen_dir_param:
+        # try to build hourly from raw files using helper in weatherdata
+        try:
+            from SEICOR import weatherdata_rad as wd
+            time_index = wd.minutely_time_utc
+            rissen_min = wd.read_all_uni_hamburg_wind_data(rissen_dir_param, station_name="RIM_", time=time_index)
+            rissen = (
+                rissen_min.replace(99999, np.nan).resample('h').mean(numeric_only=True).rename_axis('time').reset_index()
+            )
+        except Exception:
+            rissen = None
+
+    if rissen is None or (hasattr(rissen, 'empty') and rissen.empty):
+        print('Warning: Rissen hourly data unavailable; solar_rad will be NaN')
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    copied = []
+    missing = []
+
+    wind_speed_cols = ['rel_wind_speed']
+    wind_dir_cols = [ 'wind_dir']
+
+    csvs = sorted(ship_pass_dir.glob('*.csv'))
+    for csvf in csvs:
+        try:
+            df = pd.read_csv(csvf)
+        except Exception as e:
+            print(f'Failed to read CSV {csvf}: {e}')
+            continue
+
+        if 'plume_useful' not in df.columns:
+            continue
+
+        useful = df[df['plume_useful'].astype(str).str.lower().isin(['true','1','t','yes'])]
+        if useful.empty:
+            continue
+
+        def row_wind_speed(r):
+            for c in wind_speed_cols:
+                if c in r.index:
+                    try:
+                        return float(r[c])
+                    except Exception:
+                        return np.nan
+            try:
+                return float(r.get('rel_wind_speed', np.nan))
+            except Exception:
+                return np.nan
+
+        def row_wind_dir(r):
+            for c in wind_dir_cols:
+                if c in r.index:
+                    try:
+                        return float(r[c])
+                    except Exception:
+                        return np.nan
+            return np.nan
+
+        def ang_diff(a, b):
+            try:
+                return float(np.abs(( (a - b + 180.0) % 360.0 ) - 180.0))
+            except Exception:
+                return np.nan
+
+        for _, row in useful.iterrows():
+            pf = row.get('plume_file', None)
+            if pf is None or (isinstance(pf, float) and np.isnan(pf)):
+                missing.append({'csv': str(csvf), 'reason': 'missing plume_file', 'row': int(row.name)})
+                continue
+
+            solar_rad_val = np.nan
+            try:
+                utc = row.get('UTC_Time', None)
+                if pd.notna(utc) and rissen is not None:
+                    t = pd.to_datetime(utc, utc=True)
+                    th = t.floor('h')
+                    if 'time' in getattr(rissen, 'columns', []):
+                        match = rissen[rissen['time'] == th]
+                        if not match.empty and 'solar_rad' in match.columns:
+                            solar_rad_val = float(match.iloc[0]['solar_rad'])
+                    else:
+                        if th in rissen.index and 'solar_rad' in rissen.columns:
+                            solar_rad_val = float(rissen.loc[th, 'solar_rad'])
+            except Exception:
+                solar_rad_val = np.nan
+
+            wind_speed_val = row_wind_speed(row)
+            wind_dir_val = row_wind_dir(row)
+
+            # require wind direction to be perpendicular to 193.2 +/- 10 deg
+            perp1 = (193.2 + 90.0) % 360.0
+            perp2 = (193.2 - 90.0) % 360.0
+            ok_dir = False
+            if not np.isnan(wind_dir_val):
+                d1 = ang_diff(wind_dir_val, perp1)
+                d2 = ang_diff(wind_dir_val, perp2)
+                if (not np.isnan(d1) and d1 <= 10.0) or (not np.isnan(d2) and d2 <= 10.0):
+                    ok_dir = True
+            if not ok_dir:
+                # skip this plume if wind direction not perpendicular as required
+                continue
+
+            # skip plume when solar radiation (Rissen) is missing
+            try:
+                if np.isnan(solar_rad_val):
+                    # solar radiation unavailable for this hour -> skip
+                    continue
+            except Exception:
+                # if solar_rad_val is not a float-like value, skip defensively
+                continue
+
+            stability = classify_pasquill(solar_rad_val, wind_speed_val)
+
+            # find source image like other helpers
+            pfn = Path(str(pf)).name
+            stem = Path(pfn).stem
+            parts = stem.split('_')
+            img_name = None
+            if len(parts) >= 7 and parts[0] == 'plume' and parts[2] == 't':
+                try:
+                    idx = parts[1]
+                    date = parts[3]
+                    time = parts[4]
+                    mmsi = parts[6]
+                    img_name = f"plume_t_{date}_{time}_{idx}_mmsi_{mmsi}.png"
+                except Exception:
+                    img_name = None
+
+            src_img = None
+            if img_name is not None:
+                candidate = plots_dir / img_name
+                if candidate.exists():
+                    src_img = candidate
+
+            if src_img is None:
+                m = re.search(r'(20\d{6})_(\d{6})', stem)
+                mmsi_m = re.search(r'mmsi_(\d+)', stem)
+                date = m.group(1) if m else None
+                time = m.group(2) if m else None
+                mmsi = mmsi_m.group(1) if mmsi_m else None
+                candidates = []
+                if date and mmsi:
+                    pattern = f"*{date}*{mmsi}*.png"
+                    candidates = list(plots_dir.rglob(pattern))
+                if not candidates and mmsi:
+                    candidates = list(plots_dir.rglob(f"*{mmsi}*.png"))
+                if candidates:
+                    src_img = candidates[0]
+
+            if src_img is None:
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': 'image not found', 'stability': stability})
+                continue
+
+            stability_dir = dst_dir / stability
+            stability_dir.mkdir(parents=True, exist_ok=True)
+            dst_path = stability_dir / src_img.name
+
+            if dry_run:
+                print(f'DRY RUN: would copy {src_img} -> {dst_path} (stability={stability}, solar_rad={solar_rad_val}, wind_speed={wind_speed_val})')
+                copied.append(str(dst_path))
+                continue
+
+            try:
+                shutil.copy2(src_img, dst_path)
+                copied.append(str(dst_path))
+            except Exception as e:
+                print(f'Failed to copy {src_img} to {dst_path}: {e}')
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': f'copy failed: {e}', 'stability': stability})
+
+    print(f'Copied {len(copied)} images into stability folders under {dst_dir}; {len(missing)} missing/unresolved')
+    return copied, missing
+
+
+def count_useful_plumes_wind_ship_match(ship_pass_dir: Path, plots_dir: Path, dst_dir: Path,
+                                        angle_tolerance: float = 20.0, speed_diff_thresh: float = 1.0,
+                                        dry_run: bool = False):
+    """Select useful plumes where in-situ wind and ship motion are coming from
+    the same direction within +/- `angle_tolerance` degrees AND the in-situ wind
+    speed is at least `speed_diff_thresh` m/s greater than the ship speed.
+
+    Copies matching plume PNGs from `plots_dir` into `dst_dir` using the same
+    filename mapping logic as `count_useful_plumes_by_relwind_and_copy`.
+
+    Returns (copied_files, missing_files) similar to the other copy helper.
+    """
+    ship_pass_dir = Path(ship_pass_dir)
+    plots_dir = Path(plots_dir)
+    dst_dir = Path(dst_dir)
+    if not ship_pass_dir.exists():
+        print('ship_pass_dir does not exist, cannot count/copy:', ship_pass_dir)
+        return [], []
+    if not plots_dir.exists():
+        print('plots_dir does not exist, cannot find images:', plots_dir)
+        return [], []
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = []
+    missing = []
+
+    # candidate column name lists (be permissive)
+    wind_dir_cols = ['wind_dir' ]
+    wind_speed_cols = ['wind_speed']
+    ship_dir_cols = ['Mean_Course']
+    ship_speed_cols = ['Mean_Speed']
+
+    def get_first_col(series_df, candidates):
+        for c in candidates:
+            if c in series_df.columns:
+                return series_df[c]
+        # fallback: series of NaN
+        return pd.Series([np.nan] * len(series_df), index=series_df.index)
+
+    def ang_diff(a, b):
+        # minimal angular difference in degrees
+        try:
+            d = np.abs(( (a - b + 180.0) % 360.0 ) - 180.0)
+        except Exception:
+            return np.nan
+        return d
+
+    csvs = sorted(ship_pass_dir.glob('*.csv'))
+    for csvf in csvs:
+        try:
+            df = pd.read_csv(csvf)
+        except Exception as e:
+            print(f'Failed to read CSV {csvf}: {e}')
+            continue
+
+        if 'plume_useful' not in df.columns:
+            continue
+
+        useful = df[df['plume_useful'].astype(str).str.lower().isin(['true','1','t','yes'])]
+        if useful.empty:
+            continue
+
+        # get candidate columns
+        wdir = pd.to_numeric(get_first_col(useful, wind_dir_cols), errors='coerce')
+        wspd = pd.to_numeric(get_first_col(useful, wind_speed_cols), errors='coerce')
+        scourse = pd.to_numeric(get_first_col(useful, ship_dir_cols), errors='coerce')
+        sspeed = pd.to_numeric(get_first_col(useful, ship_speed_cols), errors='coerce')
+
+        # compute ship-from direction (ship_course is towards; "from" is +180)
+        ship_from = (scourse + 180.0) % 360.0
+
+        # angular difference between wind (from) and ship-from
+        diff = ang_diff(wdir, ship_from)
+
+        mask = (diff <= angle_tolerance) & (wspd >= (sspeed + speed_diff_thresh))
+
+        sel = useful[mask.fillna(False)]
+        if sel.empty:
+            continue
+
+        for _, row in sel.iterrows():
+            pf = row.get('plume_file', None)
+            if pf is None or (isinstance(pf, float) and np.isnan(pf)):
+                missing.append({'csv': str(csvf), 'reason': 'missing plume_file', 'row': int(row.name)})
+                continue
+
+            pfn = Path(str(pf)).name
+            stem = Path(pfn).stem
+            parts = stem.split('_')
+            img_name = None
+            if len(parts) >= 7 and parts[0] == 'plume' and parts[2] == 't':
+                try:
+                    idx = parts[1]
+                    date = parts[3]
+                    time = parts[4]
+                    mmsi = parts[6]
+                    img_name = f"plume_t_{date}_{time}_{idx}_mmsi_{mmsi}.png"
+                except Exception:
+                    img_name = None
+
+            src_img = None
+            if img_name is not None:
+                candidate = plots_dir / img_name
+                if candidate.exists():
+                    src_img = candidate
+
+            if src_img is None:
+                m = re.search(r'(20\d{6})_(\d{6})', stem)
+                mmsi_m = re.search(r'mmsi_(\d+)', stem)
+                date = m.group(1) if m else None
+                time = m.group(2) if m else None
+                mmsi = mmsi_m.group(1) if mmsi_m else None
+                candidates = []
+                if date and mmsi:
+                    pattern = f"*{date}*{mmsi}*.png"
+                    candidates = list(plots_dir.rglob(pattern))
+                if not candidates:
+                    if mmsi:
+                        candidates = list(plots_dir.rglob(f"*{mmsi}*.png"))
+
+                if candidates:
+                    src_img = candidates[0]
+
+            if src_img is None:
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': 'image not found'})
+                continue
+
+            dst_path = dst_dir / src_img.name
+            if dry_run:
+                print(f'DRY RUN: would copy {src_img} -> {dst_path}')
+                copied.append(str(dst_path))
+                continue
+
+            try:
+                shutil.copy2(src_img, dst_path)
+                copied.append(str(dst_path))
+            except Exception as e:
+                print(f'Failed to copy {src_img} to {dst_path}: {e}')
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': f'copy failed: {e}'})
+
+    print(f'Copied {len(copied)} images to {dst_dir}; {len(missing)} missing/unresolved')
+    return copied, missing
+
+
+def count_useful_plumes_ship_faster_and_copy(ship_pass_dir: Path, plots_dir: Path, dst_dir: Path,
+                                            angle_tolerance: float = 20.0, speed_diff_thresh: float = 0.5,
+                                            dry_run: bool = False):
+    """Select useful plumes where ship motion is coming from the same direction
+    (within +/- `angle_tolerance` degrees) as the in-situ wind AND the ship
+    speed is at least `speed_diff_thresh` m/s greater than the in-situ wind.
+
+    Copies matching plume PNGs from `plots_dir` into `dst_dir` using the same
+    filename mapping logic as the other copy helpers. Returns (copied, missing).
+    """
+    ship_pass_dir = Path(ship_pass_dir)
+    plots_dir = Path(plots_dir)
+    dst_dir = Path(dst_dir)
+    if not ship_pass_dir.exists():
+        print('ship_pass_dir does not exist, cannot count/copy:', ship_pass_dir)
+        return [], []
+    if not plots_dir.exists():
+        print('plots_dir does not exist, cannot find images:', plots_dir)
+        return [], []
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = []
+    missing = []
+
+    wind_dir_cols = ['wind_dir' ]
+    wind_speed_cols = ['wind_speed']
+    ship_dir_cols = ['Mean_Course']
+    ship_speed_cols = ['Mean_Speed']
+
+    def get_first_col(series_df, candidates):
+        for c in candidates:
+            if c in series_df.columns:
+                return series_df[c]
+        return pd.Series([np.nan] * len(series_df), index=series_df.index)
+
+    def ang_diff(a, b):
+        try:
+            d = np.abs(( (a - b + 180.0) % 360.0 ) - 180.0)
+        except Exception:
+            return np.nan
+        return d
+
+    csvs = sorted(ship_pass_dir.glob('*.csv'))
+    for csvf in csvs:
+        try:
+            df = pd.read_csv(csvf)
+        except Exception as e:
+            print(f'Failed to read CSV {csvf}: {e}')
+            continue
+
+        if 'plume_useful' not in df.columns:
+            continue
+
+        useful = df[df['plume_useful'].astype(str).str.lower().isin(['true','1','t','yes'])]
+        if useful.empty:
+            continue
+
+        wdir = pd.to_numeric(get_first_col(useful, wind_dir_cols), errors='coerce')
+        wspd = pd.to_numeric(get_first_col(useful, wind_speed_cols), errors='coerce')
+        scourse = pd.to_numeric(get_first_col(useful, ship_dir_cols), errors='coerce')
+        sspeed = pd.to_numeric(get_first_col(useful, ship_speed_cols), errors='coerce')
+
+        # ship_from is direction the ship is coming FROM (course towards +180)
+        ship_from = (scourse ) % 360.0
+        diff = ang_diff(wdir, ship_from)
+
+        # ship faster by threshold
+        mask = (diff <= angle_tolerance) & (sspeed >= (wspd + speed_diff_thresh)) 
+
+        sel = useful[mask.fillna(False)]
+        if sel.empty:
+            continue
+
+        for _, row in sel.iterrows():
+            pf = row.get('plume_file', None)
+            if pf is None or (isinstance(pf, float) and np.isnan(pf)):
+                missing.append({'csv': str(csvf), 'reason': 'missing plume_file', 'row': int(row.name)})
+                continue
+
+            pfn = Path(str(pf)).name
+            stem = Path(pfn).stem
+            parts = stem.split('_')
+            img_name = None
+            if len(parts) >= 7 and parts[0] == 'plume' and parts[2] == 't':
+                try:
+                    idx = parts[1]
+                    date = parts[3]
+                    time = parts[4]
+                    mmsi = parts[6]
+                    img_name = f"plume_t_{date}_{time}_{idx}_mmsi_{mmsi}.png"
+                except Exception:
+                    img_name = None
+
+            src_img = None
+            if img_name is not None:
+                candidate = plots_dir / img_name
+                if candidate.exists():
+                    src_img = candidate
+
+            if src_img is None:
+                m = re.search(r'(20\d{6})_(\d{6})', stem)
+                mmsi_m = re.search(r'mmsi_(\d+)', stem)
+                date = m.group(1) if m else None
+                time = m.group(2) if m else None
+                mmsi = mmsi_m.group(1) if mmsi_m else None
+                candidates = []
+                if date and mmsi:
+                    pattern = f"*{date}*{mmsi}*.png"
+                    candidates = list(plots_dir.rglob(pattern))
+                if not candidates:
+                    if mmsi:
+                        candidates = list(plots_dir.rglob(f"*{mmsi}*.png"))
+
+                if candidates:
+                    src_img = candidates[0]
+
+            if src_img is None:
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': 'image not found'})
+                continue
+
+            dst_path = dst_dir / src_img.name
+            if dry_run:
+                print(f'DRY RUN: would copy {src_img} -> {dst_path}')
+                copied.append(str(dst_path))
+                continue
+
+            try:
+                shutil.copy2(src_img, dst_path)
+                copied.append(str(dst_path))
+            except Exception as e:
+                print(f'Failed to copy {src_img} to {dst_path}: {e}')
+                missing.append({'csv': str(csvf), 'plume_file': pfn, 'reason': f'copy failed: {e}'})
+
+    print(f'Copied {len(copied)} images to {dst_dir}; {len(missing)} missing/unresolved')
+    return copied, missing
 
 
 def export_timestamps(ship_pass_dir: Path, out_csv: Path):
@@ -1036,6 +1927,17 @@ def main():
     p.add_argument('--reconcile-found', nargs=2, metavar=('DIR_A','DIR_B'), help='Compare plume_or_ship_found between two ship_pass dirs and open differing plumes from plume_root for interactive plume_useful labeling')
     p.add_argument('--merge-ship-passes', nargs=2, metavar=('ORIG_DIR','CURRENT_DIR'), help='Copy CSVs from ORIG_DIR, merge plume_useful from CURRENT_DIR, and write merged files into CURRENT_DIR (overwrite)')
     p.add_argument('--review-found', action='store_true', help='Review .nc files with plume_or_ship_found==True but plume_useful==False and relabel interactively')
+    p.add_argument('--count-plumes-wind', action='store_true', help='Count useful plumes by relative wind direction bins from ship-pass CSVs and print report')
+    p.add_argument('--copy-matching-plots', action='store_true', help='Copy plume plot PNGs for plumes matching the rel-wind filter')
+    p.add_argument('--copy-wind-ship-match', action='store_true', help='Copy plume plot PNGs where in-situ wind and ship motion come from same direction +-10° and wind speed >= ship speed + 1 m/s')
+    p.add_argument('--copy-ship-faster-match', action='store_true', help='Copy plume plot PNGs where ship motion comes from same direction +-10° and ship speed >= wind speed + 1 m/s')
+    p.add_argument('--copy-wind-faster-match', action='store_true', help='Copy plume plot PNGs where wind direction is opposite to Mean_Course +/-10° and wind speed >= Mean_Speed + 1 m/s')
+    p.add_argument('--copy-by-stability', action='store_true', help='Classify plumes by Pasquill stability (Rissen solar_rad + CSV wind) and copy images into stability folders')
+    p.add_argument('--rissen-dir', required=False, default=None, help='Directory containing Rissen raw wind/solar files (optional)')
+    p.add_argument('--plots-dir', required=False, default=r"P:\data\\SEICOR\\useful_plumes_plots\\no2", help='Directory containing plume plot PNGs')
+    p.add_argument('--copy-dst', required=False, default=r"P:\data\\SEICOR\\selected_plume_images", help='Destination directory to copy matching plume PNGs into')
+    p.add_argument('--dry-run-copy', action='store_true', help='If set, do not actually copy files; just print what would be copied')
+    p.add_argument('--count-plumes-wind-and-copy-images', action='store_true', help='Count useful plumes by relative wind direction bins from ship-pass CSVs, print report, and copy example images to output dirs')
     args = p.parse_args()
 
     plume_root = Path(args.plume_root)
@@ -1096,6 +1998,37 @@ def main():
         return
     if args.review_found:
         review_found_and_relabel(plume_root, min_date)
+        return
+    if args.count_plumes_wind:
+        count_useful_plumes_by_relwind(ship_pass_dir)
+        return
+    if args.copy_matching_plots:
+        plots_dir = Path(args.plots_dir)
+        dst = Path(args.copy_dst)
+        count_useful_plumes_by_relwind_and_copy(ship_pass_dir, plots_dir, dst, rel_wind_speed_thresh=1.5, dry_run=args.dry_run_copy)
+        return
+    if args.copy_wind_ship_match:
+        plots_dir = Path(args.plots_dir)
+        dst = Path(args.copy_dst)
+        count_useful_plumes_wind_ship_match(ship_pass_dir, plots_dir, dst, angle_tolerance=20.0, speed_diff_thresh=1.0, dry_run=args.dry_run_copy)
+        return
+    if args.copy_ship_faster_match:
+        plots_dir = Path(args.plots_dir)
+        dst = Path(args.copy_dst)
+        count_useful_plumes_ship_faster_and_copy(ship_pass_dir, plots_dir, dst, angle_tolerance=10.0, speed_diff_thresh=1, dry_run=args.dry_run_copy)
+        return
+    if args.copy_wind_faster_match:
+        plots_dir = Path(args.plots_dir)
+        dst = Path(args.copy_dst)
+        count_useful_plumes_wind_faster_and_copy(ship_pass_dir, plots_dir, dst, angle_tolerance=10.0, speed_diff_thresh=1.0, dry_run=args.dry_run_copy)
+        return
+    if args.copy_by_stability:
+        plots_dir = Path(args.plots_dir)
+        dst = Path(args.copy_dst)
+        copy_plumes_by_stability(ship_pass_dir, plots_dir, dst, rissen_dir_param=args.rissen_dir, dry_run=args.dry_run_copy)
+        return
+    if args.count_plumes_wind_and_copy_images:
+        count_useful_plumes_by_relwind_and_copy(ship_pass_dir, plume_root)
         return
     if ship_pass_dir.exists():
         
