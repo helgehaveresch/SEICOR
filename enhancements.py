@@ -126,6 +126,25 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
         ),
     )
     ds["vea"] = np.round(ds.vea - 90.0, 1)
+    # add an extended plume window: 10 minutes before t to 15 minutes after t
+    ext_start = t - pd.Timedelta(minutes=10)
+    ext_end = t + pd.Timedelta(minutes=15)
+    plume_window_extended = ((measurement_times >= ext_start) & (measurement_times < ext_end))
+    if plume_window_extended.sum() > 0:
+        no2_ext = ds_impact["a[NO2]"].isel(dim_0=plume_window_extended) - ds_impact["a[NO2]"].isel(dim_0=window_ref).mean(dim="dim_0")
+        vert_no2_ext = no2_ext.sum(dim="viewing_direction")
+        o4_ext = ds_impact["a[O4]"].isel(dim_0=plume_window_extended) - ds_impact["a[O4]"].isel(dim_0=window_ref).mean(dim="dim_0")
+
+        ds = ds.assign_coords(plume_window_extended=ds_impact["dim_0"].isel(dim_0=plume_window_extended).values)
+        ds = ds.assign(
+            no2_extended=(["image_row", "plume_window_extended"], ds_impact["a[NO2]"].isel(dim_0=plume_window_extended).values),
+            o4_extended=(["image_row", "plume_window_extended"], ds_impact["a[O4]"].isel(dim_0=plume_window_extended).values),
+            times_plume_extended=(["plume_window_extended"], np.array(pd.to_datetime(measurement_times[plume_window_extended]), dtype='datetime64[ns]')),
+            no2_enhancement_c_back_extended=(["image_row", "plume_window_extended"], no2_ext.values),
+            o4_enhancement_c_back_extended=(["image_row", "plume_window_extended"], o4_ext.values),
+            vertically_integrated_no2_enhancement_c_back_extended=(["plume_window_extended"], vert_no2_ext.values),
+        )
+
     if df_lp is not None:
         lp_window = ((df_lp.index >= t - pd.Timedelta(minutes=window_minutes[0])) & (df_lp.index < t + pd.Timedelta(minutes=window_minutes[1])))
         lp_window_ref = ((df_lp.index >= ref_start) & (df_lp.index < ref_end))
@@ -314,6 +333,36 @@ def upwind_downwind_interp_background_enh(ds, row,
         no2_ref_down=(["image_row", "window_ref_down"], ds_impact["a[NO2]"].isel(dim_0=downwind_window_ref).values),
         o4_ref_down=(["image_row", "window_ref_down"], ds_impact["a[O4]"].isel(dim_0=downwind_window_ref).values),
     )
+    # add an extended plume window: 10 minutes before t to 15 minutes after t
+    ext_start = t - pd.Timedelta(minutes=10)
+    ext_end = t + pd.Timedelta(minutes=15)
+    plume_window_extended = ((measurement_times >= ext_start) & (measurement_times < ext_end))
+    if plume_window_extended.sum() > 0:
+        times_ext = pd.to_datetime(measurement_times[plume_window_extended])
+        denom = (t_down_center - t_ref_center).total_seconds()
+        alpha_ext = ((times_ext - t_ref_center).total_seconds() / denom).astype(float)
+        alpha_ext = np.clip(alpha_ext, 0.0, 1.0)
+        dim0_coords_ext = ds_impact["dim_0"].isel(dim_0=plume_window_extended).values
+        alpha_da_ext = xr.DataArray(alpha_ext, dims=("dim_0",), coords={"dim_0": dim0_coords_ext})
+
+        up_exp_ext = up_mean.expand_dims(dim_0=alpha_da_ext.coords["dim_0"])
+        down_exp_ext = down_mean.expand_dims(dim_0=alpha_da_ext.coords["dim_0"])
+        interp_bg_ext = (1 - alpha_da_ext) * up_exp_ext + alpha_da_ext * down_exp_ext
+        no2_enh_ext = ds_impact["a[NO2]"].isel(dim_0=plume_window_extended) - interp_bg_ext
+        vert_no2_ext = no2_enh_ext.sum(dim="viewing_direction")
+
+        up_o4_exp_ext = up_mean_o4.expand_dims(dim_0=alpha_da_ext.coords["dim_0"])
+        down_o4_exp_ext = down_mean_o4.expand_dims(dim_0=alpha_da_ext.coords["dim_0"])
+        interp_bg_o4_ext = (1 - alpha_da_ext) * up_o4_exp_ext + alpha_da_ext * down_o4_exp_ext
+        o4_enh_ext = ds_impact["a[O4]"].isel(dim_0=plume_window_extended) - interp_bg_o4_ext
+
+        ds = ds.assign_coords(plume_window_extended=ds_impact["dim_0"].isel(dim_0=plume_window_extended).values)
+        ds = ds.assign(
+            no2_enhancement_interp_extended=(["image_row", "plume_window_extended"], no2_enh_ext.values),
+            vertically_integrated_no2_enhancement_interp_extended=(["plume_window_extended"], vert_no2_ext.values),
+            o4_enhancement_interp_extended=(["image_row", "plume_window_extended"], o4_enh_ext.values),
+            times_plume_extended=(["plume_window_extended"], np.array(pd.to_datetime(measurement_times[plume_window_extended]), dtype='datetime64[ns]')),
+        )
     return ds
 
 def polynomial_background_enh(ds_impact_masked, degree=8): 
