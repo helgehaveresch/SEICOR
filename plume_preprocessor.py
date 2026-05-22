@@ -158,7 +158,34 @@ for idx, ship_pass_single in ship_passes.iterrows():
         ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
         Path(plumes_out_dir).mkdir(parents=True, exist_ok=True)
         ds_plume = SEICOR.plumes.sort_plumes(ds_plume, out_dir, p_threshold_plume=0.03, p_threshold_ship=0.02, date=date)
+        
         if settings["Plotting"]["generate_plots"] and ds_plume.attrs.get("plume_or_ship_found", "False") == "True":
+            ref_image = ds_plume["no2_ref"] - ds_plume["no2_ref"].mean(dim="window_ref")
+            # if ds_plume["no2_ref_down"] exists append ds_plume["no2_ref_down"] - ds_plume["no2_ref_down"].mean(dim="window_ref") to ref_image
+            if "no2_ref_down" in ds_plume:
+                ref_image_down = ds_plume["no2_ref_down"] - ds_plume["no2_ref_down"].mean(dim="window_ref_down")
+                ref_image_down = ref_image_down.rename({"window_ref_down": "window_ref"})  # unify dimension name
+                #ref_image_down = ref_image_down.expand_dims("window_ref")
+                ref_image = xr.concat([ref_image, ref_image_down], dim="window_ref",join="outer")
+            ref_image_mean = ref_image.mean()
+            ref_image_std = ref_image.std()
+            mask = SEICOR.plumes.detect_plume_ztest(
+                ds_plume["no2_enhancement_interp"].values,
+                bg_mean=ref_image_mean.values,
+                bg_std=ref_image_std.values,
+                p_threshold=0.20,
+                min_cluster_size=5,
+                connectivity=1,
+                kernel_arm=1,
+                require_connection=True,
+                ds_plume=ds_plume,
+                keep_second_largest=False,
+                second_size_threshold=100,
+            )            
+            ds_plume = ds_plume.assign(plume_mask=(["image_row", "window_plume"], mask.astype(bool)))
+
+            # store enhancement plume mask in the plume dataset
+            SEICOR.plotting.plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date)
             ref_image = ds_plume["no2_ref"] - ds_plume["no2_ref"].mean(dim="window_ref")
             mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=30, ds_plume=ds_plume)
             SEICOR.plotting.plot_reference_image_with_plume_mask(ref_image, mask, ds_plume, out_dir, date)
