@@ -114,22 +114,31 @@ except Exception as e:
     df_insitu = None
 #%% Initialize lp-doas data
 try:
-    df_lp_doas = SEICOR.lp_doas.read_lpdoas(lp_doas_dir, date)
-    df_lp_doas = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
-    df_lp_doas_SC = SEICOR.lp_doas.read_lpdoas(lp_doas_dir, date, mode="SC")
-    df_lp_doas_SC = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas_SC, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
+    df_lp_doas_310 = SEICOR.lp_doas.read_lpdoas_310(lp_doas_dir, date)
+    df_lp_doas_365 = SEICOR.lp_doas.read_lpdoas_365(lp_doas_dir, date)
+    df_lp_doas_310 = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas_310, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
+    df_lp_doas_365 = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas_365, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
+
+    #df_lp_doas_SC_310 = SEICOR.lp_doas.read_lpdoas_310(lp_doas_dir, date, mode="SC")
+    #df_lp_doas_SC_365 = SEICOR.lp_doas.read_lpdoas_365(lp_doas_dir, date, mode="SC")
+    #df_lp_doas_SC_310 = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas_SC_310, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
+    #df_lp_doas_SC_365 = SEICOR.lp_doas.mask_lp_doas_file(df_lp_doas_SC_365, start_time, end_time, rms_threshold=processing_settings["quality"]["min_rms_lp_doas"])
 
     mask, ds_impact_masked = SEICOR.impact.mask_rms_and_reduce_impact(ds_impact, rms_threshold=processing_settings["quality"]["min_rms_IMPACT"])
     ds_impact_masked = SEICOR.enhancements.polynomial_background_enh(ds_impact_masked, degree=enhancement_settings["polynomial_background_degree"])
     ds_impact_masked = SEICOR.enhancements.fft_background_enh(ds_impact_masked, t_cut=enhancement_settings["high_pass_filter_time_period"])
-    df_lp_doas_SC = SEICOR.enhancements.polynomial_background_enh_lp_doas(df_lp_doas_SC, degree=enhancement_settings["polynomial_background_degree"])
-    df_lp_doas_SC = SEICOR.enhancements.fft_background_enh_lp_doas(df_lp_doas_SC, t_cut=enhancement_settings["high_pass_filter_time_period"])
+    #df_lp_doas_SC_310 = SEICOR.enhancements.polynomial_background_enh_lp_doas(df_lp_doas_SC_310, degree=enhancement_settings["polynomial_background_degree"])
+    #df_lp_doas_SC_310 = SEICOR.enhancements.fft_background_enh_lp_doas(df_lp_doas_SC_310, t_cut=enhancement_settings["high_pass_filter_time_period"])
+    #df_lp_doas_SC_365 = SEICOR.enhancements.fft_background_enh_lp_doas(df_lp_doas_SC_365, t_cut=enhancement_settings["high_pass_filter_time_period"])
+    #df_lp_doas_SC_365 = SEICOR.enhancements.polynomial_background_enh_lp_doas(df_lp_doas_SC_365, degree=enhancement_settings["polynomial_background_degree"])
+
 except Exception as e:
     print("Error in LP-DOAS / IMPACT processing block:", e)
     traceback.print_exc()
     # Fallbacks so downstream cells can still run. Adjust these as needed.
     df_lp_doas = None
-    df_lp_doas_SC = None
+    df_lp_doas_SC_310 = None
+    df_lp_doas_SC_365 = None
     mask = None
     # keep ds_impact available if it exists, otherwise None
     ds_impact_masked = ds_impact if 'ds_impact' in locals() else None
@@ -150,12 +159,12 @@ if 'plume_or_ship_found' not in ship_passes.columns:
 
 #%% Process each ship pass
 for idx, ship_pass_single in ship_passes.iterrows():
-    ds_plume = SEICOR.enhancements.upwind_constant_background_enh(ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
+    ds_plume = SEICOR.enhancements.upwind_constant_background_enh(ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp_310=df_lp_doas_310, df_lp_365=df_lp_doas_365)
     if ds_plume is not None:
         ds_plume = SEICOR.plumes.add_ship_trajectory_to_plume_ds(ds_plume, filtered_ship_groups)
         ds_plume = SEICOR.plumes.add_insitu_to_plume_ds(ds_plume, df_insitu)
         #ds_plume = SEICOR.impact.call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds_plume, ship_pass_single, settings["processing"]["enhancement"]["nlin_param_file"], IMPACT_path)
-        ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes, df_lp=df_lp_doas)
+        ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes)
         Path(plumes_out_dir).mkdir(parents=True, exist_ok=True)
         ds_plume = SEICOR.plumes.sort_plumes(ds_plume, out_dir, p_threshold_plume=0.03, p_threshold_ship=0.02, date=date)
         if settings["Plotting"]["generate_plots"] and ds_plume.attrs.get("plume_or_ship_found", "False") == "True":
@@ -306,7 +315,7 @@ if settings["Plotting"]["generate_plots"]:
     _safe_run(
         "plot_all_instruments_timeseries_VMR",
         SEICOR.plotting.plot_all_instruments_timeseries_VMR,
-        df_lp_doas,
+        df_lp_doas_365,
         df_insitu,
         ds_impact,
         ds_impact["VMR_NO2"],
@@ -319,7 +328,7 @@ if settings["Plotting"]["generate_plots"]:
     _safe_run(
         "plot_all_instruments_timeseries_SC",
         SEICOR.plotting.plot_all_instruments_timeseries_SC,
-        df_lp_doas_SC,
+        df_lp_doas_SC_365,
         df_insitu,
         ds_impact,
         df_closest=ship_passes,
