@@ -15,7 +15,7 @@ def rolling_background_enh(ds, window_size=500):
 def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passes,
                                     window_minutes=(1, 3), ref_search_minutes=60,
                                     ref_window_minutes=1, ref_min_span_seconds=30,
-                                    ref_min_count=3, do_lp=False, df_lp=None):
+                                    ref_min_count=3, do_lp=False, df_lp_310=None, df_lp_365=None):
     """Subtracts background for a single ship pass (row from ship_passes).
 
     This variant enforces minimum quality for the chosen reference window: it must
@@ -126,34 +126,63 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
         ),
     )
     ds["vea"] = np.round(ds.vea - 90.0, 1)
-    if df_lp is not None:
-        lp_window = ((df_lp.index >= t - pd.Timedelta(minutes=window_minutes[0])) & (df_lp.index < t + pd.Timedelta(minutes=window_minutes[1])))
-        lp_window_ref = ((df_lp.index >= ref_start) & (df_lp.index < ref_end))
-        lp_no2_enhancement = df_lp['Fit Coefficient (NO2)'][lp_window] - df_lp['Fit Coefficient (NO2)'][lp_window_ref].mean()
+    if df_lp_365 is not None:
+        lp_window = ((df_lp_365.index >= t - pd.Timedelta(minutes=window_minutes[0])) & (df_lp_365.index < t + pd.Timedelta(minutes=window_minutes[1])))
+        lp_window_ref = ((df_lp_365.index >= ref_start) & (df_lp_365.index < ref_end))
+        lp_no2_enhancement = df_lp_365['Fit Coefficient (NO2)'][lp_window] - df_lp_365['Fit Coefficient (NO2)'][lp_window_ref].mean()
 
-        lp_idx = df_lp.index
+        lp_idx = df_lp_365.index
         if isinstance(lp_idx, pd.DatetimeIndex) and lp_idx.tz is not None:
             lp_idx = lp_idx.tz_convert("UTC").tz_localize(None)
         lp_idx_window = lp_idx[lp_window]
         lp_idx_window_ref = lp_idx[lp_window_ref]
 
         ds = ds.assign_coords(
-            lp_window=np.where(lp_window)[0],
-            lp_window_ref=np.where(lp_window_ref)[0],
+            lp_window_365=np.where(lp_window)[0],
+            lp_window_ref_365=np.where(lp_window_ref)[0],
         )
 
         ds = ds.assign(
-            lp_no2=(["lp_window"], df_lp['Fit Coefficient (NO2)'][lp_window].values),
-            lp_rms=(["lp_window"], df_lp['RMS'][lp_window].values),
-            lp_no2_enhancement=(["lp_window"], lp_no2_enhancement.values),
-            lp_times_window=(["lp_window"], np.array(lp_idx_window, dtype="datetime64[ns]")),
-            lp_no2_ref=(["lp_window_ref"], df_lp['Fit Coefficient (NO2)'][lp_window_ref].values),
-            lp_times_window_ref=(["lp_window_ref"], np.array(lp_idx_window_ref, dtype="datetime64[ns]")),
+            lp_no2=(["lp_window_365"], df_lp_365['Fit Coefficient (NO2)'][lp_window].values),
+            lp_rms=(["lp_window_365"], df_lp_365['RMS'][lp_window].values),
+            lp_no2_enhancement=(["lp_window_365"], lp_no2_enhancement.values),
+            lp_times_window_365=(["lp_window_365"], np.array(lp_idx_window, dtype="datetime64[ns]")),
+            lp_no2_ref=(["lp_window_ref_365"], df_lp_365['Fit Coefficient (NO2)'][lp_window_ref].values),
+            lp_times_window_ref_365=(["lp_window_ref_365"], np.array(lp_idx_window_ref, dtype="datetime64[ns]")),
         )
+
+    if df_lp_310 is not None:
+        lp_window = ((df_lp_310.index >= t - pd.Timedelta(minutes=window_minutes[0])) & (df_lp_310.index < t + pd.Timedelta(minutes=window_minutes[1])))
+        lp_window_ref = ((df_lp_310.index >= ref_start) & (df_lp_310.index < ref_end))
+        lp_o3_enhancement = df_lp_310['Fit Coefficient (O3)'][lp_window] - df_lp_310['Fit Coefficient (O3)'][lp_window_ref].mean()
+        lp_so2_enhancement = df_lp_310['Fit Coefficient (SO2)'][lp_window] - df_lp_310['Fit Coefficient (SO2)'][lp_window_ref].mean()
+        lp_idx = df_lp_310.index
+        if isinstance(lp_idx, pd.DatetimeIndex) and lp_idx.tz is not None:
+            lp_idx = lp_idx.tz_convert("UTC").tz_localize(None)
+        lp_idx_window = lp_idx[lp_window]
+        lp_idx_window_ref = lp_idx[lp_window_ref]
+
+        ds = ds.assign_coords(
+            lp_window_310=np.where(lp_window)[0],
+            lp_window_ref_310=np.where(lp_window_ref)[0],
+        )
+
+        ds = ds.assign(
+            lp_o3=(["lp_window_310"], df_lp_310['Fit Coefficient (O3)'][lp_window].values),
+            lp_so2=(["lp_window_310"], df_lp_310['Fit Coefficient (SO2)'][lp_window].values),
+            lp_rms=(["lp_window_310"], df_lp_310['RMS'][lp_window].values),
+            lp_o3_enhancement=(["lp_window_310"], lp_o3_enhancement.values),
+            lp_so2_enhancement=(["lp_window_310"], lp_so2_enhancement.values),
+            lp_times_window_310=(["lp_window_310"], np.array(lp_idx_window, dtype="datetime64[ns]")),
+            lp_o3_ref=(["lp_window_ref_310"], df_lp_310['Fit Coefficient (O3)'][lp_window_ref].values),
+            lp_so2_ref=(["lp_window_ref_310"], df_lp_310['Fit Coefficient (SO2)'][lp_window_ref].values),
+            lp_times_window_ref_310=(["lp_window_ref_310"], np.array(lp_idx_window_ref, dtype="datetime64[ns]")),
+        )
+
 
     return ds
 
-def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times, ship_passes, window_minutes=(1, 3), ref_search_minutes=60, ref_window_minutes=1, ref_min_span_seconds=40, ref_min_count=100, do_lp=False, df_lp = None):
+def upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times, ship_passes, window_minutes=(1, 3), ref_search_minutes=60, ref_window_minutes=1, ref_min_span_seconds=40, ref_min_count=100, ):
     """
     Subtracts background for a single ship pass (row from ship_passes).
     Returns: dict with keys: mmsi, t, no2_data, times_window, window, window_ref, ref_found
