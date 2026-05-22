@@ -447,10 +447,13 @@ def plot_single_ship(
     if mode == "dSCD":
         plt.figure(figsize=(10, 6))
         ax = plt.gca()
+        # choose symmetric color scale around zero based on data max abs value
+        _data = np.array(no2_sel)
+        _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
         pcm = ax.pcolormesh(
             X, Y, no2_sel,
             shading='auto',
-            cmap='viridis', vmin=vmin, vmax=vmax
+            cmap='seismic', vmin=-_m, vmax=_m
         )
         cbar = plt.colorbar(pcm)
         cbar.set_label(r"NO$_2$ dSCD / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=22)
@@ -479,10 +482,13 @@ def plot_single_ship(
     elif mode == "enhancement":
         plt.figure(figsize=(10, 6))
         ax = plt.gca()
+        # symmetric color scale around zero based on data maximum absolute value
+        _data = np.array(no2_full)
+        _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
         pcm = ax.pcolormesh(
             X, Y, no2_full,
             shading='auto',
-            cmap='viridis', vmin=vmin, vmax=vmax
+            cmap='seismic', vmin=-_m, vmax=_m
         )
         cbar = plt.colorbar(pcm)
         cbar.set_label(r"NO$_2$ Enh. / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=22)
@@ -539,17 +545,20 @@ def plot_single_ship(
 
         # --- 2D NO2 enhancement plot ---
         ax = axs[0]
+        # symmetric seismic colormap: choose vmax from data magnitude
+        _data = np.array(no2_full)
+        _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
         pcm = ax.pcolormesh(
             X, Y, no2_full,
             shading='auto',
-            cmap='viridis', vmin=vmin if vmin is not None else -3e16, vmax=vmax
+            cmap='seismic', vmin=-_m, vmax=_m
         )
         cbar = plt.colorbar(pcm, ax=ax)
         cbar.set_label(r"NO$_2$ Enh. / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=20)
         cbar.ax.tick_params(labelsize=18)
         cbar.ax.yaxis.get_offset_text().set_fontsize(18)
 
-        ax.set_ylabel("Viewing direction", fontsize=22)
+        ax.set_ylabel("VEA / °", fontsize=22)
         ax.set_title("NO$_2$ dSCD Enhancements", fontsize=24)
 
         # Set y-ticks to actual viewing direction angles (every Nth for clarity)
@@ -610,6 +619,19 @@ def plot_no2_enhancements_for_all_ships(path_ship_passes, plot_out_dir):
             t_after_start_h=None,
             interval_h=None,
             mode="enhancement",
+            vmin=-3e16,
+            include_mmsi=True,
+            include_timestamp=True,
+            x_axis_tick_interval=1,
+            save_fig=True,
+            save_dir=plot_out_dir,
+        )
+
+        plot_single_ship(
+            dir_enhancements=ds_plume,
+            t_after_start_h=None,
+            interval_h=None,
+            mode="combined",
             vmin=-3e16,
             include_mmsi=True,
             include_timestamp=True,
@@ -722,7 +744,9 @@ def plot_ship_pass_subplot_v1(
     # NO2 enhancement 2D plot
     ax0 = fig.add_subplot(gs[0, 0])
     X, Y = np.meshgrid(ds_plume["times_window"], np.arange(ds_plume["no2_enhancement_c_back"].shape[0]))
-    pcm = ax0.pcolormesh(X, Y, ds_plume["no2_enhancement_c_back"], shading='auto')
+    _data = np.array(ds_plume["no2_enhancement_c_back"].values)
+    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
+    pcm = ax0.pcolormesh(X, Y, ds_plume["no2_enhancement_c_back"], shading='auto', cmap='seismic', vmin=-_m, vmax=_m)
     fig.colorbar(pcm, ax=ax0, label=r"NO$_2$ Enhancement / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
     tstr_fname = pd.to_datetime(ds_plume.t).strftime('%Y%m%d_%H%M%S')
@@ -907,7 +931,9 @@ def plot_ship_pass_subplot_v2(
     # NO2 enhancement 2D plot
     ax0 = fig.add_subplot(gs[0, 0])
     X, Y = np.meshgrid(times_num, np.arange(ds_plume["no2_enhancement_c_back"].shape[0]))
-    pcm = ax0.pcolormesh(X, Y, ds_plume["no2_enhancement_c_back"], shading='auto')
+    _data = np.array(ds_plume["no2_enhancement_c_back"].values)
+    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
+    pcm = ax0.pcolormesh(X, Y, ds_plume["no2_enhancement_c_back"], shading='auto', cmap='seismic', vmin=-_m, vmax=_m)
     fig.colorbar(pcm, ax=ax0, label=r"NO$_2$ Enhancement / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
     tstr_fname = pd.to_datetime(ds_plume.t).strftime('%Y%m%d_%H%M%S')
@@ -1225,7 +1251,9 @@ def plot_wind_polar(ds, wind_dir_var='wind_dir', wind_speed_var='wind_speed', ti
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, polar=True)
 
-    sc = ax.scatter(wind_dir_rad, wind_speed, c=wind_speed, cmap='viridis', alpha=0.75)
+    _data = np.array(wind_speed)
+    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
+    sc = ax.scatter(wind_dir_rad, wind_speed, c=wind_speed, cmap='seismic', vmin=-_m, vmax=_m, alpha=0.75)
 
     ax.set_theta_zero_location('N')
     ax.set_theta_direction(-1)
@@ -1628,7 +1656,9 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
         xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
     yedges = np.arange(ny + 1)
 
-    mesh = ax.pcolormesh(xedges, yedges, data, cmap="viridis", shading="auto")
+    _data = np.array(data)
+    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
+    mesh = ax.pcolormesh(xedges, yedges, data, cmap="seismic", shading="auto", vmin=-_m, vmax=_m)
     # contour needs x coords for proper alignment; use mesh coordinates
     Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
     ax.contour(Xc, Yc, mask.astype(int), levels=[0.5], colors="red", linewidths=1.5)
@@ -1645,9 +1675,9 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
     ax.set_xlabel("Time (UTC)")
     fig.autofmt_xdate()
     mmsi = ds_plume.attrs.get('mmsi', 'unknown_mmsi')
-    ax.set_title(f"NO$_2$ enhancement with plume mask, date: {date}, mmsi: {mmsi}")
+    ax.set_title(f"NO$_2$ date: {date}, mmsi: {mmsi}")
     cbar = fig.colorbar(mesh, ax=ax)
-    cbar.set_label("NO2 enhancement")
+    cbar.set_label("NO$_2$ enhancement")
     out_folder = out_dir / f"plume_mask" / f"plumes_{date}"
     out_folder.mkdir(parents=True, exist_ok=True)
     try:
@@ -1686,7 +1716,9 @@ def plot_reference_image_with_plume_mask(ref_image, mask, ds_plume, out_dir, dat
     # y edges correspond to VEA dimension
     yedges = np.arange(ny + 1)
 
-    mesh = ax.pcolormesh(xedges, yedges, data, cmap="viridis", shading="auto")
+    _data = np.array(data)
+    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
+    mesh = ax.pcolormesh(xedges, yedges, data, cmap="seismic", shading="auto", vmin=-_m, vmax=_m)
 
     # contour overlay (align to cell centers)
     Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
@@ -1710,7 +1742,7 @@ def plot_reference_image_with_plume_mask(ref_image, mask, ds_plume, out_dir, dat
     ax.set_title("Reference NO$_2$ variability, date: {}".format(date))
 
     cbar = fig.colorbar(mesh, ax=ax)
-    cbar.set_label("dNO2")
+    cbar.set_label("NO$_2$ Enh.")
 
     # build output folder and filename similar to other plotting function
     out_base = out_dir / f"reference_quality" / f"plumes_{date}_upwind"
