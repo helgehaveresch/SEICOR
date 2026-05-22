@@ -1144,14 +1144,14 @@ def plot_ship_pass_subplot_v2(
     n_NO2_impact = impact_enh_rolling * 1e4 / (L * n_air_aligned) * 1e9
 
     # Convert LP-DOAS times to matplotlib date numbers for consistent plotting
-    lp_available = ("lp_times_window" in ds_plume) and ("lp_no2_enhancement" in ds_plume)
+    lp_available = ("lp_times_window_365" in ds_plume) and ("lp_no2_enhancement" in ds_plume)
     lp_times_num = np.array([])
 
     if lp_available:
         try:
-            lp_times_dt = pd.to_datetime(ds_plume["lp_times_window"].values)
+            lp_times_dt = pd.to_datetime(ds_plume["lp_times_window_365"].values)
         except Exception:
-            lp_times_dt = pd.to_datetime(ds_plume.get("lp_times_window", []))
+            lp_times_dt = pd.to_datetime(ds_plume.get("lp_times_window_365", []))
 
         # If pandas Series / tz-aware, normalize to UTC-naive
         try:

@@ -14,16 +14,16 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-finkenwerder_path = r"Q:\BREDOM\SEICOR\weatherstations\Finkenwerder_Airport\weatherdata_hourly.csv"
-fuhlsbuettel_path = r"Q:\BREDOM\SEICOR\weatherstations\Fuhlsbüttel_Airport\weatherdata_hourly.csv"
-mittelnkirchen_path = r"Q:\BREDOM\SEICOR\weatherstations\Mittelnkirchen-Hohenfelde\weatherdata_hourly.csv"
-york_path = r"Q:\BREDOM\SEICOR\weatherstations\York-Moorende\weatherdata_hourly.csv"
-rissen_dir = r"Q:\BREDOM\SEICOR\weatherstations\Rissen"
-billwerder_dir = r"Q:\BREDOM\SEICOR\weatherstations\Billwerder"
-horiba_dir = r"Q:\BREDOM\SEICOR\InSitu"
-airpointer_dir = r"Q:\BREDOM\SEICOR\InSitu\Messdaten"
-billwerder_path = r"Q:\BREDOM\SEICOR\weatherstations\Billwerder\weatherdata_hourly.csv"
-rissen_path = r"Q:\BREDOM\SEICOR\weatherstations\Rissen\weatherdata_hourly.csv"
+finkenwerder_path = r"D:\weatherstations\Finkenwerder_Airport\weatherdata_hourly.csv"
+fuhlsbuettel_path = r"D:\weatherstations\Fuhlsbüttel_Airport\weatherdata_hourly.csv"
+mittelnkirchen_path = r"D:\weatherstations\Mittelnkirchen-Hohenfelde\weatherdata_hourly.csv"
+york_path = r"D:\weatherstations\York-Moorende\weatherdata_hourly.csv"
+rissen_dir = r"D:\weatherstations\Rissen"
+billwerder_dir = r"D:\weatherstations\Billwerder"
+horiba_dir = r"D:\InSitu"
+airpointer_dir = r"D:\InSitu\Messdaten"
+billwerder_path = r"D:\weatherstations\Billwerder\weatherdata_hourly.csv"
+rissen_path = r"D:\weatherstations\Rissen\weatherdata_hourly.csv"
 
 
 
@@ -369,7 +369,7 @@ median_df = pd.concat(
 )
 median_df.index.name = "time"
 #save to csv
-median_df.to_csv(r"Q:\BREDOM\SEICOR\weatherstations\median_winddata_hourly.csv")
+median_df.to_csv(r"D:\weatherstations\median_winddata_hourly.csv")
 
 # expose as median_hourly (reset index)
 median_hourly = median_df.reset_index()
@@ -492,7 +492,7 @@ plt.show()
 
 # %%
 
-def plot_with_orthogonal_regression(x, y, xlabel, ylabel, max_1_1, one_to_one=True, xlim=None, ylim=None,
+def plot_with_orthogonal_regression(x, y, xlabel, ylabel, max_1_1, min_1_1 = 0, one_to_one=True, xlim=None, ylim=None,
                                     color=None, color_label=None, cmap='viridis'):
     """
     Scatter plot with orthogonal (both-sided) linear regression (total least squares via PCA).
@@ -510,23 +510,57 @@ def plot_with_orthogonal_regression(x, y, xlabel, ylabel, max_1_1, one_to_one=Tr
     mask = np.isfinite(xarr) & np.isfinite(yarr)
 
     colorarr = None
-    if color is not None:
-        colorarr = np.asarray(color)
-        # ensure colorarr has same shape and mask it
-        if colorarr.shape != xarr.shape:
-            # try to align via pandas index/values if Series passed
+    # support coloring by point density by passing color='density'
+    use_density = isinstance(color, str) and color.lower() in ('density', 'point_density')
+    if use_density:
+        xm = xarr[mask]
+        ym = yarr[mask]
+        # try scipy gaussian_kde when available
+        try:
+            from scipy.stats import gaussian_kde
+            xy = np.vstack([xm, ym])
+            z = gaussian_kde(xy)(xy)
+            # normalize
+            if z.max() > z.min():
+                z = (z - z.min()) / (z.max() - z.min())
+        except Exception:
+            # fallback to 2D histogram binning
             try:
-                colorarr = np.asarray(pd.Series(color).reindex_like(pd.Series(x)).values)
+                bins = 40
+                H, xedges, yedges = np.histogram2d(xm, ym, bins=bins)
+                xi = np.searchsorted(xedges, xm) - 1
+                yi = np.searchsorted(yedges, ym) - 1
+                xi = np.clip(xi, 0, H.shape[0]-1)
+                yi = np.clip(yi, 0, H.shape[1]-1)
+                z = H[xi, yi].astype(float)
+                if z.max() > z.min():
+                    z = (z - z.min()) / (z.max() - z.min())
             except Exception:
-                colorarr = None
-        if colorarr is not None:
-            colorarr = np.where(mask, colorarr, np.nan)
+                z = np.full(mask.sum(), np.nan)
 
-    # scatter only masked points (avoid plotting NaNs)
-    if colorarr is None:
-        sc = plt.scatter(xarr[mask], yarr[mask], s=20, alpha=0.8)
+        colorarr = np.full_like(xarr, np.nan, dtype=float)
+        colorarr[mask] = z
+        sc = plt.scatter(xarr[mask], yarr[mask], c=colorarr[mask], cmap=cmap, s=28, edgecolor='k', linewidth=0.1, alpha=0.8)
+
+
     else:
-        sc = plt.scatter(xarr[mask], yarr[mask], c=colorarr[mask], cmap=cmap, s=28, edgecolor='k', linewidth=0.1)
+        if color is not None:
+            colorarr = np.asarray(color)
+            # ensure colorarr has same shape and mask it
+            if colorarr.shape != xarr.shape:
+                # try to align via pandas index/values if Series passed
+                try:
+                    colorarr = np.asarray(pd.Series(color).reindex_like(pd.Series(x)).values)
+                except Exception:
+                    colorarr = None
+            if colorarr is not None:
+                colorarr = np.where(mask, colorarr, np.nan)
+
+        # scatter only masked points (avoid plotting NaNs)
+        if colorarr is None:
+            sc = plt.scatter(xarr[mask], yarr[mask], s=20, alpha=0.4)
+        else:
+            sc = plt.scatter(xarr[mask], yarr[mask], c=colorarr[mask], cmap=cmap, s=20, alpha=0.4)
 
     slope = intercept = r = np.nan
     if mask.sum() >= 2:
@@ -551,8 +585,31 @@ def plot_with_orthogonal_regression(x, y, xlabel, ylabel, max_1_1, one_to_one=Tr
             xmax = np.nanmax(xm)
             xvals = np.linspace(xmin, xmax, 200)
             yvals = slope * xvals + intercept
+            # compute RMSE and mean bias (model - observation)
+            try:
+                rmse = float(np.sqrt(np.nanmean((xm - ym) ** 2)))
+            except Exception:
+                rmse = np.nan
+            try:
+                mean_bias = float(np.nanmean(ym - xm))
+            except Exception:
+                mean_bias = np.nan
+            # keep fit parameters in legend, move RMSE/Bias to the title
             label_fit = f"Orth. fit: slope={slope:.3f}, offset={intercept:.3f}, r={r:.3f}"
             plt.plot(xvals, yvals, color='k', linewidth=1.5, label=label_fit)
+            try:
+                stat_title = f"RMSE={rmse:.3f}, Bias={mean_bias:.3f}"
+            except Exception:
+                stat_title = ""
+            # append stats to any existing title, otherwise set as title
+            try:
+                current_title = plt.gca().get_title()
+                if current_title:
+                    plt.title(f"{current_title} — {stat_title}")
+                else:
+                    plt.title(stat_title)
+            except Exception:
+                pass
 
     if one_to_one:
         # determine sensible range for 1:1 line from data or provided limits
@@ -568,7 +625,7 @@ def plot_with_orthogonal_regression(x, y, xlabel, ylabel, max_1_1, one_to_one=Tr
                 # extend a bit for visibility
                 pad = 0.02 * (xmax - xmin) if xmax > xmin else 1.0
                 xmin -= pad; xmax += pad
-        plt.plot([0, max_1_1], [0, max_1_1], 'r--', label='1:1 Line')
+        plt.plot([min_1_1, max_1_1], [min_1_1, max_1_1], 'r--', label='1:1 Line')
 
     # add colorbar if color provided
     if colorarr is not None and np.isfinite(colorarr).any():
@@ -599,6 +656,7 @@ mittelnkirchen_june_main = mittelnkirchen_june[mittelnkirchen_june['time'].dt.da
 billwerder_june_main = billwerder_june[billwerder_june['time'].dt.day < 25]
 median_june_main = median_june[median_june['time'].dt.day < 25]
 #%%
+
 plot_with_orthogonal_regression(
     airpointer_june_main['wind_speed'],
     finkenwerder_june_main['wspd'],
@@ -965,4 +1023,85 @@ plot_with_orthogonal_regression(
     color_label='Median wind speed (m/s)'
 )
 
+# %%
+plot_with_orthogonal_regression(
+    airpointer_june_main['wind_speed'],
+    median_june_main['median_wspd'],
+    'Wind Speed (m/s) Airpointer',
+    'Wind Speed (m/s) Median',
+    max_1_1=11,
+    color=airpointer_june_main.get('wind_dir'),
+    color_label='Airpointer wind dir (°)'
+)
+plot_with_orthogonal_regression(
+    york_june_main['wspd'],
+    median_june_main['median_wspd'],
+    'Wind Speed (m/s) York-Moorende',
+    'Wind Speed (m/s) Median',
+    max_1_1=11,
+    color=york_june_main.get('wdir'),
+    color_label='York wind dir (°)'
+)
+plot_with_orthogonal_regression(
+    mittelnkirchen_june_main['wspd'],
+    median_june_main['median_wspd'],
+    'Wind Speed (m/s) Mittelnkirchen-Hohenfelde',
+    'Wind Speed (m/s) Median',
+    max_1_1=11,
+    color=mittelnkirchen_june_main.get('wdir'),
+    color_label='Mittelnkirchen wind dir (°)'
+)
+plot_with_orthogonal_regression(
+    finkenwerder_june_main['wspd'],
+    median_june_main['median_wspd'],
+    'Wind Speed (m/s) Finkenwerder Airport',
+    'Wind Speed (m/s) Median',
+    max_1_1=11,
+    color=finkenwerder_june_main.get('wdir'),
+    color_label='Finkenwerder wind dir (°)'
+)
+# %%
+#concatenate all wind datasets that make up the mediandataset and create a median dataset that four times the size of the original median dataset, by concatenating the median dataset with itself 4 times, and apply the plotting function to the concatenated dataset to compare the median with itself (should yield a perfect 1:1 relationship) and color by the original median wind speed to check for any patterns in the self-comparison. This can serve as a sanity check for the plotting function and the median dataset.
+# concatenate median dataset with itself 4 times
+median_june_main_concat = pd.concat([median_june_main]*4, ignore_index=True)
+measurements_june_main_speed_concat = pd.concat([finkenwerder_june_main["wspd"], york_june_main["wspd"], mittelnkirchen_june_main["wspd"], airpointer_june_main["wind_speed"]], ignore_index=True)
+measurements_june_main_dir_concat = pd.concat([finkenwerder_june_main["wdir"], york_june_main["wdir"], mittelnkirchen_june_main["wdir"], airpointer_june_main["wind_dir"]], ignore_index=True)
+plot_with_orthogonal_regression(
+    median_june_main_concat['median_wspd'],
+    measurements_june_main_speed_concat,
+    'Wind Speed (m/s) Median',
+    'Wind Speed (m/s) Median',
+    max_1_1=11,
+    color='density',
+    color_label="Point density"
+)
+
+plot_with_orthogonal_regression(
+    median_june_main_concat['median_wdir'],
+    measurements_june_main_dir_concat,
+    'Wind Direction (°) Median',
+    'Wind Direction (°) Median',
+    max_1_1=360,
+    color='density',
+    color_label="Point density"
+)
+# %%
+plot_with_orthogonal_regression(
+    mittelnkirchen_june_main_filtered['u_wind'],
+    billwerder_june_main_filtered['u_wind_50'],
+    'u Wind / m/s mittelnkirchen-Hohenfelde',
+    'u Wind / m/s Billwerder 50m',
+    min_1_1=-10,
+    max_1_1=10,
+)
+
+# %%
+plot_with_orthogonal_regression(
+    mittelnkirchen_june_main_filtered['v_wind'],
+    billwerder_june_main_filtered['v_wind_50'],
+    'v Wind / m/s mittelnkirchen-Hohenfelde',
+    'v Wind / m/s Billwerder 50m',
+    min_1_1=-10,
+    max_1_1=10,
+)
 # %%

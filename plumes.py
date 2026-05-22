@@ -127,7 +127,7 @@ def detect_plume_ztest(
     # new options for source-connection checking
     require_connection=False,
     ds_plume=None,
-    time_tol_seconds=30,
+    time_tol_seconds=60,
     viewdir_min=8,
     viewdir_max=18,
     # option to keep second largest cluster
@@ -392,7 +392,7 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
     else:
         print('no NO2 enhancement variable (interp or c_back) in dataset')
         return ds_plume
-
+    
     # record which enhancement variable will be used and create an alias
     ds_plume.attrs["enhancement_var_used"] = varname
     if 'no2_enhancement_interp' not in ds_plume:
