@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import SEICOR.wind as swind
 import os
 from io import StringIO
 from glob import glob
@@ -113,4 +114,26 @@ def add_wind_to_ship_passes(df_closest, ds):
         wind_speed, wind_dir = calc_mean_wind(ds, t)
         df_closest.at[i, 'wind_speed'] = wind_speed
         df_closest.at[i, 'wind_dir'] = wind_dir
+        # compute relative wind seen from the moving ship using Mean_Speed and Mean_Course
+        try:
+            ship_speed = row.get('Mean_Speed', np.nan)
+            ship_course = row.get('Mean_Course', np.nan)
+        except Exception:
+            ship_speed = np.nan
+            ship_course = np.nan
+        if np.isnan(ship_speed) or np.isnan(ship_course) or np.isnan(wind_speed) or np.isnan(wind_dir):
+            df_closest.at[i, 'rel_wind_speed'] = np.nan
+            df_closest.at[i, 'rel_wind_dir'] = np.nan
+            df_closest.at[i, 'rel_wind_u'] = np.nan
+            df_closest.at[i, 'rel_wind_v'] = np.nan
+        else:
+            rel_speed, rel_dir = swind.compute_relative_wind(ship_speed, ship_course, wind_speed, wind_dir)
+            # compute vector components (meteorological FROM -> to vector: u = -s*sin(dir), v = -s*cos(dir))
+            dir_rad = np.deg2rad(rel_dir)
+            u_rel = -rel_speed * np.sin(dir_rad)
+            v_rel = -rel_speed * np.cos(dir_rad)
+            df_closest.at[i, 'rel_wind_speed'] = float(rel_speed)
+            df_closest.at[i, 'rel_wind_dir'] = float(rel_dir)
+            df_closest.at[i, 'rel_wind_u'] = float(u_rel)
+            df_closest.at[i, 'rel_wind_v'] = float(v_rel)
     return df_closest
