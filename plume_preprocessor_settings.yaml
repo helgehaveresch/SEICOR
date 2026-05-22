@@ -1,4 +1,4 @@
-date: "250802"
+date: "250412"
 
 base_paths:
   windows: "Q:\\BREDOM\\SEICOR"
@@ -50,10 +50,10 @@ processing:
     nlin_param_file: pars/nlin_d/SEICOR_D_offaxis.NO2_VIS_upwind
 
 Output:
-  plots_out_dir: "analysis_4"
-  img_out_dir: "video_4"
-  ship_passes_out_dir: "ship_passes_4"
-  plume_out_dir: "plumes_4"
+  plots_out_dir: "analysis_5"
+  img_out_dir: "video_5"
+  ship_passes_out_dir: "ship_passes_5"
+  plume_out_dir: "plumes_5"
 
 Plotting:
   generate_plots: true
