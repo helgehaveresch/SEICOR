@@ -5,7 +5,6 @@ import matplotlib.dates as mdates
 import pandas as pd
 import os
 import sys
-#%%
 
 from pathlib import Path
 import zipfile
@@ -126,9 +125,9 @@ def read_wind10_range(
 	return pd.concat(frames, ignore_index=True)
 
 
-# --- Example: read a date range and append into one df ---
+
 start_date = "250601"  # yymmdd
-end_date = "250725"   # yymmdd (optional)
+end_date = "250725"   # yymmdd 
 
 df = read_wind10_range(
 	start_date,
@@ -150,19 +149,25 @@ df["Time and Date"] = pd.to_datetime(
 	format="%d/%m/%Y %H:%M:%S",
 	errors="coerce",
 )
+
+HEIGHT_LEVELS = [300, 270, 241, 212, 183, 154, 125, 96, 67, 38, 10]
+
+
+def plot_height_series(ax, x_values, column_template: str, *, heights=HEIGHT_LEVELS, label_template: str, y_transform=None):
+	for height in heights:
+		series = df[column_template.format(height=height)]
+		if y_transform is not None:
+			series = y_transform(series, height)
+		ax.plot(x_values, series, label=label_template.format(height=height))
+
 # %%
-plt.figure(figsize=(12, 6))
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 300m"], label="ws at 300m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 270m"], label="ws at 270m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 241m"], label="ws at 241m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 212m"], label="ws at 212m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 183m"], label="ws at 183m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 154m"], label="ws at 154m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 125m"], label="ws at 125m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 96m"], label="ws at 96m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 67m"], label="ws at 67m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 38m"], label="ws at 38m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 10m")
+plt.figure(figsize=(30, 6))
+plot_height_series(
+	plt.gca(),
+	df["Time and Date"],
+	"Horizontal Wind Speed (m/s) at {height}m",
+	label_template="ws at {height}m",
+)
 plt.legend()
 plt.xlabel("Date")
 plt.ylabel("Horizontal Wind Speed (m/s)")
@@ -170,24 +175,21 @@ plt.title("Wind Speed at Different Heights")
 
 # Show only a reasonable number of datetime ticks
 ax = plt.gca()
-locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
+locator = mdates.AutoDateLocator(minticks=5, maxticks=30)
 ax.xaxis.set_major_locator(locator)
 ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
 plt.gcf().autofmt_xdate()
 
 # %%
-plt.figure(figsize=(12, 6))
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 300m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 300m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 270m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 270m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 241m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 241m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 212m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 212m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 183m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 183m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 154m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 154m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 125m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 125m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 96m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 96m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 67m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 67m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 38m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 38m")
-plt.plot(df["Time and Date"], df["Horizontal Wind Speed (m/s) at 10m"]/df["Horizontal Wind Speed (m/s) at 10m"], label="ws at 10m")
+plt.figure(figsize=(30, 6))
+
+plot_height_series(
+	plt.gca(),
+	df["Time and Date"],
+	"Horizontal Wind Speed (m/s) at {height}m",
+	label_template="ws at {height}m",
+	y_transform=lambda series, height: series / df["Horizontal Wind Speed (m/s) at 10m"],
+)
 plt.legend()
 plt.xlabel("Date")
 plt.ylabel("Scale factor (m/s)")
@@ -195,9 +197,68 @@ plt.title("Wind Speed Normalized by 10m")
 
 # Show only a reasonable number of datetime ticks
 ax = plt.gca()
-locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
+locator = mdates.AutoDateLocator(minticks=5, maxticks=30)
 ax.xaxis.set_major_locator(locator)
 ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
 plt.gcf().autofmt_xdate()
 
+# %%
+#plot Wind Direction (deg) at at different heights
+plt.figure(figsize=(30, 6))
+plot_height_series(
+	plt.gca(),
+	df["Time and Date"],
+	"Wind Direction (deg) at {height}m",
+	label_template="wd at {height}m",
+)
+plt.legend()
+plt.xlabel("Date")
+plt.ylabel("Wind Direction (deg)")
+plt.title("Wind Direction at Different Heights")
+
+# Show only a reasonable number of datetime ticks
+ax = plt.gca()
+locator = mdates.AutoDateLocator(minticks=5, maxticks=30)
+ax.xaxis.set_major_locator(locator)
+ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+plt.gcf().autofmt_xdate()
+
+# %%
+""""
+# if the wind direction is changing by 180° +/- 5° between to measurements following each other, it is likely a 180° ambiguity. We can correct it by adding 180° to the second measurement.
+def correct_wind_direction_ambiguity(wd_series: pd.Series, threshold: float = 10.0) -> pd.Series:
+	wd_corrected = wd_series.copy()
+	for i in range(1, len(wd_series)):
+		current = wd_corrected.iloc[i]
+		previous = wd_corrected.iloc[i-1]
+		if pd.isna(current) or pd.isna(previous):
+			continue
+		# Use circular angular distance so wrap-around at 0/360 is handled correctly.
+		diff = abs((current - previous + 180) % 360 - 180)
+		if abs(diff - 180) < threshold:
+			wd_corrected.iloc[i] = (current + 180) % 360
+	return wd_corrected
+# Apply the correction to each height
+for height in HEIGHT_LEVELS:
+	df[f"Wind Direction (deg) at {height}m"] = correct_wind_direction_ambiguity(df[f"Wind Direction (deg) at {height}m"])
+# Re-plot the corrected wind direction
+plt.figure(figsize=(30, 6))
+plot_height_series(
+	plt.gca(),
+	df["Time and Date"],
+	"Wind Direction (deg) at {height}m",
+	label_template="wd at {height}m",
+)
+plt.legend()
+plt.xlabel("Date")
+plt.ylabel("Wind Direction (deg)")
+plt.title("Corrected Wind Direction at Different Heights")
+
+# Show only a reasonable number of datetime ticks
+ax = plt.gca()
+locator = mdates.AutoDateLocator(minticks=3, maxticks=8)
+ax.xaxis.set_major_locator(locator)
+ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+plt.gcf().autofmt_xdate()
+"""
 # %%
