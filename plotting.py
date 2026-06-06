@@ -1685,7 +1685,67 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
         tstr = pd.to_datetime(t_attr).strftime('%Y%m%d_%H%M%S') if t_attr is not None else "unknown_time"
     except Exception:
         tstr = "unknown_time"
-    fname = out_folder / f"no2_enhancement_with_plume_mask_{date}_{tstr}_{mmsi}.png"
+    fname = out_folder / f"no2_enhancement_with_plume_mask_{tstr}_{mmsi}.png"
+    fig.savefig(fname, bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_no2_enhancement_with_plume_and_ship_mask(ds_plume, plume_mask, ship_mask, out_dir, attr_str):
+    """Plot NO2 enhancement with separate plume and ship mask contours.
+
+    Plume pixels are drawn in red and ship pixels are drawn in blue.
+    """
+    data = ds_plume["no2_enhancement_interp"].values
+    ny, nx = data.shape
+
+    times = pd.to_datetime(ds_plume["times_plume"].values)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    xnum = mdates.date2num(times.to_pydatetime())
+    dx = np.diff(xnum)
+    if len(dx) > 0:
+        left = xnum[0] - dx[0] / 2.0
+        right = xnum[-1] + dx[-1] / 2.0
+        xedges = np.concatenate(([left], xnum[:-1] + dx / 2.0, [right]))
+    else:
+        xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+    yedges = np.arange(ny + 1)
+
+    _data = np.array(data)
+    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
+    mesh = ax.pcolormesh(xedges, yedges, data, cmap="seismic", shading="auto", vmin=-_m, vmax=_m)
+
+    xcent = (xedges[:-1] + xedges[1:]) / 2.0
+    ycent = (yedges[:-1] + yedges[1:]) / 2.0
+    Xc, Yc = np.meshgrid(xcent, ycent)
+
+    plume_contour = ax.contour(Xc, Yc, np.asarray(plume_mask, dtype=int), levels=[0.5], colors="black", linewidths=1.5)
+    ship_contour = ax.contour(Xc, Yc, np.asarray(ship_mask, dtype=int), levels=[0.5], colors="blue", linewidths=1.5)
+
+    ax.xaxis_date()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+    vea_vals = ds_plume["vea"].values
+    yticks = np.arange(0, len(vea_vals), 3)
+    ax.set_yticks(yticks)
+    ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
+    ax.set_ylabel("VEA / °")
+    ax.set_xlabel("Time (UTC)")
+    fig.autofmt_xdate()
+
+    mmsi = ds_plume.attrs.get('mmsi', 'unknown_mmsi')
+    cbar = fig.colorbar(mesh, ax=ax)
+    cbar.set_label("NO$_2$ enhancement")
+    try:
+        t_attr = ds_plume.attrs.get('t')
+        tstr = pd.to_datetime(t_attr).strftime('%Y%m%d_%H%M%S') if t_attr is not None else "unknown_time"
+        date_str = pd.to_datetime(t_attr).strftime('%Y%m%d') if t_attr is not None else "unknown_date"
+    except Exception:
+        tstr = "unknown_time"
+    out_folder = out_dir / f"plumes_{tstr}"
+    out_folder.mkdir(parents=True, exist_ok=True)
+    ax.set_title(f"NO$_2$ {tstr}, attr: {attr_str}")
+    fname = out_folder / f"no2_enhancement_with_plume_and_ship_mask_{tstr}_{mmsi}_{attr_str}.png"
     fig.savefig(fname, bbox_inches='tight')
     plt.close(fig)
 
@@ -1756,6 +1816,6 @@ def plot_reference_image_with_plume_mask(ref_image, mask, ds_plume, out_dir, dat
     except Exception:
         tstr = "unknown_time"
     mmsi = ds_plume.attrs.get('mmsi', 'unknown_mmsi')
-    fname = out_folder / f"reference_image_with_plume_mask_{date}_{tstr}_{mmsi}.png"
+    fname = out_folder / f"reference_image_with_plume_mask_{tstr}_{mmsi}.png"
     fig.savefig(fname, bbox_inches='tight')
     plt.close(fig)
