@@ -115,10 +115,10 @@ def add_insitu_to_plume_ds(ds_plume, df_insitu):
     return ds_plume
 
 
-def detect_plume_ztest(
+def _detect_plume_ztest_core(
     image,
-    bg_mean=None,
-    bg_std=None,
+    bg_mean,
+    bg_std,
     p_threshold=0.15,
     min_cluster_size=20,
     kernel_arm=1,
@@ -130,31 +130,12 @@ def detect_plume_ztest(
     time_tol_seconds=60,
     viewdir_min=8,
     viewdir_max=18,
-    # option to keep second largest cluster
     keep_second_largest=False,
     second_size_threshold=None,
 ):
-    """
-    Detect plume pixels using the neighborhood Z-test described (Kuhlmann et al. 2019).
-
-    New parameters:
-    - require_connection: if True, at least one kept cluster must intersect the source region.
-    - t0: central timestamp of source event (datetime or numeric same units as time_grid).
-    - time_grid: 2D array (same shape as image) with timestamp per pixel (datetime64 or numeric seconds).
-    - viewdir_grid: 2D array (same shape as image) with viewing direction per pixel (numeric).
-    - time_tol_seconds: tolerance around t0 (seconds) to define source-region in time.
-    - viewdir_min/viewdir_max: viewing direction window to define source-region.
-    - keep_second_largest: if True, also include second largest cluster when it exceeds second_size_threshold.
-    - second_size_threshold: required size (pixels) for second largest cluster to be kept. If None defaults to min_cluster_size.
-    """
-    kernel_arm=1
     if image.ndim != 2:
         raise ValueError("image must be 2D")
 
-    if bg_mean is None:
-        bg_mean = np.nanmean(image)
-    if bg_std is None:
-        bg_std = np.nanstd(image, ddof=0)
     bg_mean = np.asarray(bg_mean)
     bg_std = np.asarray(bg_std)
 
@@ -291,6 +272,201 @@ def detect_plume_ztest(
         final_mask = final_mask | (labeled == sec_label)
 
     return final_mask
+
+
+def detect_plume_ztest(
+    image,
+    bg_mean=None,
+    bg_std=None,
+    p_threshold=0.15,
+    min_cluster_size=20,
+    kernel_arm=1,
+    median_kernel_arm=None,
+    connectivity=1,
+    # new options for source-connection checking
+    require_connection=False,
+    ds_plume=None,
+    time_tol_seconds=60,
+    viewdir_min=8,
+    viewdir_max=18,
+    # option to keep second largest cluster
+    keep_second_largest=False,
+    second_size_threshold=None,
+):
+    """
+    Detect plume pixels using the neighborhood Z-test described (Kuhlmann et al. 2019).
+
+    This is the original single-pass routine. If bg_mean/bg_std are not provided,
+    they are computed once from the full image.
+    """
+    if bg_mean is None:
+        bg_mean = np.nanmean(image)
+    if bg_std is None:
+        bg_std = np.nanstd(image, ddof=0)
+
+    return _detect_plume_ztest_core(
+        image,
+        bg_mean=bg_mean,
+        bg_std=bg_std,
+        p_threshold=p_threshold,
+        min_cluster_size=min_cluster_size,
+        kernel_arm=kernel_arm,
+        median_kernel_arm=median_kernel_arm,
+        connectivity=connectivity,
+        require_connection=require_connection,
+        ds_plume=ds_plume,
+        time_tol_seconds=time_tol_seconds,
+        viewdir_min=viewdir_min,
+        viewdir_max=viewdir_max,
+        keep_second_largest=keep_second_largest,
+        second_size_threshold=second_size_threshold,
+    )
+
+
+def detect_plume_ztest_iterative(
+    image,
+    bg_mean=None,
+    bg_std=None,
+    p_threshold=0.15,
+    min_cluster_size=20,
+    kernel_arm=1,
+    median_kernel_arm=None,
+    connectivity=1,
+    # new options for source-connection checking
+    require_connection=False,
+    ds_plume=None,
+    time_tol_seconds=60,
+    viewdir_min=8,
+    viewdir_max=18,
+    # option to keep second largest cluster
+    keep_second_largest=False,
+    second_size_threshold=None,
+    ship_p_threshold=0.15,
+    ship_min_cluster_size=20,
+    ship_kernel_arm=0,
+    ship_median_kernel_arm=None,
+    ship_connectivity=1,
+    max_iter=10,
+    stop_pixels=15,
+):
+    """
+    Iterative neighborhood Z-test.
+
+    If bg_mean/bg_std are omitted, the image is repeatedly background-estimated
+    after masking the previous iteration's plume pixels. The plume test itself
+    always runs on the original image; only the background statistics are updated.
+    Ship pixels are detected in each iteration as well, and the working image is
+    masked by the union of plume and ship masks. The loop stops when the union
+    mask changes by at most stop_pixels or max_iter is reached.
+
+    Returns:
+        plume_mask, ship_mask, plume_masks, ship_masks
+        - plume_mask: plume mask from the last iteration
+        - ship_mask: ship mask from the last iteration
+        - plume_masks: list of plume masks from each iteration
+        - ship_masks: list of ship masks from each iteration
+    """
+    if image.ndim != 2:
+        raise ValueError("image must be 2D")
+    
+    if bg_mean is not None and bg_std is not None:
+        plume_mask = _detect_plume_ztest_core(
+            image,
+            bg_mean=bg_mean,
+            bg_std=bg_std,
+            p_threshold=p_threshold,
+            min_cluster_size=min_cluster_size,
+            kernel_arm=kernel_arm,
+            median_kernel_arm=median_kernel_arm,
+            connectivity=connectivity,
+            require_connection=require_connection,
+            ds_plume=ds_plume,
+            time_tol_seconds=time_tol_seconds,
+            viewdir_min=viewdir_min,
+            viewdir_max=viewdir_max,
+            keep_second_largest=keep_second_largest,
+            second_size_threshold=second_size_threshold,
+        )
+        ship_mask = detect_plume_ztest_left(
+            image,
+            p_threshold=ship_p_threshold,
+            min_cluster_size=ship_min_cluster_size,
+            kernel_arm=ship_kernel_arm,
+            median_kernel_arm=ship_median_kernel_arm,
+            connectivity=ship_connectivity,
+        )
+        plume_mask = np.asarray(plume_mask, dtype=bool)
+        ship_mask = np.asarray(ship_mask, dtype=bool)
+        return plume_mask, ship_mask, [plume_mask.copy()], [ship_mask.copy()]
+
+    working_image = np.array(image, dtype=float, copy=True)
+    previous_mask = None
+    plume_mask = np.zeros_like(working_image, dtype=bool)
+    ship_mask = np.zeros_like(working_image, dtype=bool)
+    final_mask = np.zeros_like(working_image, dtype=bool)
+    plume_masks = []
+    ship_masks = []
+
+    for i in range(max(int(max_iter), 1)):
+        print("Iterative Z-test: iteration", i )
+        current_bg_mean = np.nanmean(working_image)
+        current_bg_std = np.nanstd(working_image, ddof=0)
+        # guard: if the background mean is unreasonably large relative to std,
+        # reset mean to 0 to avoid skewing the Z-test (user request).
+        if np.isfinite(current_bg_mean) and np.isfinite(current_bg_std):
+            if current_bg_mean > current_bg_std:
+                current_bg_mean = 0.0
+                print(f"Iterative Z-test: warning - bg_mean ({current_bg_mean:.2f}) > 2 * bg_std ({current_bg_std:.2f}), resetting bg_mean to 0 for Z-test")
+
+        plume_mask = _detect_plume_ztest_core(
+            image,
+            bg_mean=current_bg_mean,
+            bg_std=current_bg_std,
+            p_threshold=p_threshold,
+            min_cluster_size=min_cluster_size,
+            kernel_arm=kernel_arm,
+            median_kernel_arm=median_kernel_arm,
+            connectivity=connectivity,
+            require_connection=require_connection,
+            ds_plume=ds_plume,
+            time_tol_seconds=time_tol_seconds,
+            viewdir_min=viewdir_min,
+            viewdir_max=viewdir_max,
+            keep_second_largest=keep_second_largest,
+            second_size_threshold=second_size_threshold,
+        )
+        ship_mask = detect_plume_ztest_left(
+            image,
+            bg_mean=current_bg_mean,
+            bg_std=current_bg_std,
+            p_threshold=ship_p_threshold,
+            min_cluster_size=ship_min_cluster_size,
+            kernel_arm=ship_kernel_arm,
+            median_kernel_arm=ship_median_kernel_arm,
+            connectivity=ship_connectivity,
+        )
+        plume_mask = np.asarray(plume_mask, dtype=bool)
+        ship_mask = np.asarray(ship_mask, dtype=bool)
+        final_mask = plume_mask | ship_mask
+        plume_masks.append(plume_mask.copy())
+        ship_masks.append(ship_mask.copy())
+
+        if previous_mask is not None:
+            changed_pixels = np.count_nonzero(final_mask != previous_mask)
+            net_change = int(np.count_nonzero(final_mask) - np.count_nonzero(previous_mask))
+            print(f"Iterative Z-test: changed pixels = {changed_pixels}, net mask change = {net_change:+d}")
+            if changed_pixels <= stop_pixels:
+                print("Iterative Z-test: stopping iteration (convergence reached)")
+                break
+
+        if not final_mask.any():
+            print("Iterative Z-test: no ship/plume pixels detected, stopping iteration")
+            break
+
+        working_image = np.where(final_mask, np.nan, image).astype(float, copy=False)
+        previous_mask = final_mask.copy()
+
+    return plume_mask, ship_mask, plume_masks, ship_masks
 
 def detect_plume_ztest_left(
     image,
@@ -531,3 +707,4 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
     plt.close('all')
     ds_plume.attrs["plume_or_ship_found"] = str(bool(plume_found or ship_found))
     return ds_plume
+# %%
