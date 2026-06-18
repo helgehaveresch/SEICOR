@@ -223,6 +223,137 @@ def count_ship_passes(ship_pass_dir: Path):
     print(f'Total plume_or_ship_found == True: {total_found}')
 
 
+def plot_ship_length_histograms(plume_timestamps_csv: Path, out_dir: Path | None = None):
+    """Plot ship-length histograms for useful vs not-useful plumes.
+
+    Reads `plume_timestamps_csv`, then resolves each row to the corresponding
+    ship-pass CSV listed in `source_csv` to retrieve `Length_in_m`.
+    """
+    plume_timestamps_csv = Path(plume_timestamps_csv)
+    if not plume_timestamps_csv.exists():
+        print('plume timestamp CSV does not exist:', plume_timestamps_csv)
+        return None
+
+    ts_df = pd.read_csv(plume_timestamps_csv)
+    required_cols = {'plume_useful', 'source_csv'}
+    missing_cols = required_cols - set(ts_df.columns)
+    if missing_cols:
+        print(f'Missing required columns in {plume_timestamps_csv}: {sorted(missing_cols)}')
+        return None
+    if ('plume_file' not in ts_df.columns) and ('UTC_Time' not in ts_df.columns):
+        print(f"Need at least 'plume_file' or 'UTC_Time' in {plume_timestamps_csv} to match ship-pass rows.")
+        return None
+
+    def _as_bool(value):
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if value is None:
+            return False
+        return str(value).strip().lower() in ('true', '1', 't', 'yes')
+
+    ts_df = ts_df.copy()
+    ts_df['plume_useful'] = ts_df['plume_useful'].map(_as_bool)
+
+    csv_cache = {}
+    useful_lengths_list = []
+    not_useful_lengths_list = []
+
+    for _, row in ts_df.iterrows():
+        src_csv = row.get('source_csv', None)
+        if pd.isna(src_csv):
+            continue
+        src_csv = str(src_csv)
+
+        if src_csv not in csv_cache:
+            try:
+                src_df = pd.read_csv(src_csv)
+            except Exception:
+                csv_cache[src_csv] = None
+                continue
+            if 'Length_in_m' not in src_df.columns:
+                csv_cache[src_csv] = None
+                continue
+            csv_cache[src_csv] = src_df
+
+        src_df = csv_cache[src_csv]
+        if src_df is None:
+            continue
+
+        matched_row = None
+        if 'plume_file' in ts_df.columns and 'plume_file' in src_df.columns and not pd.isna(row.get('plume_file', None)):
+            pfile = str(row['plume_file'])
+            m = src_df[src_df['plume_file'].astype(str) == pfile]
+            if not m.empty:
+                matched_row = m.iloc[0]
+
+        if matched_row is None and 'UTC_Time' in ts_df.columns and 'UTC_Time' in src_df.columns and not pd.isna(row.get('UTC_Time', None)):
+            utc = str(row['UTC_Time'])
+            m = src_df[src_df['UTC_Time'].astype(str) == utc]
+            if not m.empty:
+                matched_row = m.iloc[0]
+
+        if matched_row is None:
+            continue
+
+        length_val = pd.to_numeric(matched_row.get('Length_in_m', np.nan), errors='coerce')
+        if pd.isna(length_val):
+            continue
+
+        if bool(row['plume_useful']):
+            useful_lengths_list.append(float(length_val))
+        else:
+            not_useful_lengths_list.append(float(length_val))
+
+    useful_lengths = np.asarray(useful_lengths_list, dtype=float)
+    not_useful_lengths = np.asarray(not_useful_lengths_list, dtype=float)
+
+    if useful_lengths.size == 0:
+        print('No useful plumes with valid ship length found via', plume_timestamps_csv)
+        return None
+    if not_useful_lengths.size == 0:
+        print('No not-useful plumes with valid ship length found via', plume_timestamps_csv)
+        return None
+    print(f'number of useful plumes with length > 250m: {(np.sum(useful_lengths > 250))}')
+    print(f'number of not-useful plumes with length > 250m: {(np.sum(not_useful_lengths > 250))}')
+
+    bins = np.histogram_bin_edges(np.concatenate([useful_lengths, not_useful_lengths]), bins=[0, 50, 100, 150, 200, 250, 300, 400])
+
+    if out_dir is None:
+        out_dir = plume_timestamps_csv.parent
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path_useful = out_dir / f'{plume_timestamps_csv.stem}_ship_length_histogram_useful_zoom.png'
+    out_path_not_useful = out_dir / f'{plume_timestamps_csv.stem}_ship_length_histogram_not_useful_zoom.png'
+
+    fig_useful, ax_useful = plt.subplots(1, 1, figsize=(8, 5))
+    ax_useful.hist(useful_lengths, bins=bins, color='#1f77b4', edgecolor='black', alpha=0.85)
+    ax_useful.set_title(f'Useful plumes (n={useful_lengths.size})')
+    ax_useful.set_xlabel('Ship length (m)')
+    ax_useful.set_ylabel('Counts')
+    #limit y axis to max 120
+    ax_useful.set_ylim(0, max( 120, ax_useful.get_ylim()[1]))
+    ax_useful.grid(True, alpha=0.3)
+    fig_useful.tight_layout()
+    fig_useful.savefig(out_path_useful, dpi=200, bbox_inches='tight')
+    plt.close(fig_useful)
+
+    fig_not_useful, ax_not_useful = plt.subplots(1, 1, figsize=(8, 5))
+    ax_not_useful.hist(not_useful_lengths, bins=bins, color='#d62728', edgecolor='black', alpha=0.85)
+    ax_not_useful.set_title(f'Not useful plumes (n={not_useful_lengths.size})')
+    ax_not_useful.set_xlabel('Ship length (m)')
+    ax_not_useful.set_ylabel('Counts')
+    #limit y axis to max 120
+    ax_not_useful.set_ylim(0, max( 120, ax_useful.get_ylim()[1]))    
+    ax_not_useful.grid(True, alpha=0.3)
+    fig_not_useful.tight_layout()
+    fig_not_useful.savefig(out_path_not_useful, dpi=200, bbox_inches='tight')
+    plt.close(fig_not_useful)
+
+    print(f'Saved useful histogram to {out_path_useful}')
+    print(f'Saved not-useful histogram to {out_path_not_useful}')
+    return out_path_useful, out_path_not_useful
+
+
 def count_useful_plumes_by_relwind(ship_pass_dir: Path, rel_wind_speed_thresh: float = 1.5):
     """Count plume rows across ship-pass CSVs where `plume_useful==True` and
     `rel_wind_speed > rel_wind_speed_thresh` and `rel_wind_dir` falls into
@@ -1917,8 +2048,10 @@ def main():
     p.add_argument('--plume-root', required=False, default=r"P:\data\\SEICOR\plumes_2", help='Root directory containing plume subfolders (recursive search). Defaults to Q:\\BREDOM\\SEICOR\\plumes_2')
     p.add_argument('--filter', required=False, default=None, help='Optional substring filter for file paths')
     p.add_argument('--ship-pass-dir', required=False, default=r"P:\data\\SEICOR\ship_passes_2", help='Directory containing ship_passes CSV files')
+    p.add_argument('--plume-timestamps-csv', required=False, default=r"P:\data\\SEICOR\plume_timestamps.csv", help='CSV containing UTC_Time and plume_useful used for ship-length histograms')
     p.add_argument('--sync-csvs', action='store_true', help='Only sync plume_useful into ship-pass CSVs and exit')
     p.add_argument('--count-csvs', action='store_true', help='Count total ship_pass rows and useful plumes in CSVs and exit')
+    p.add_argument('--plot-ship-length-histograms', action='store_true', help='Plot ship-length histograms for useful vs not useful plumes using --plume-timestamps-csv and source_csv')
     p.add_argument('--export-timestamps', required=False, default=None, help='Path to CSV to write UTC_Time and plume_useful from all ship-pass CSVs')
     p.add_argument('--count-duplicate-mmsi', action='store_true', help='Count MMSI occurrences when plume_useful==True and report duplicates')
     p.add_argument('--sync-and-report', action='store_true', help='Sync CSVs, export timestamps (to --export-timestamps or default), and print counts')
@@ -1958,6 +2091,7 @@ def main():
     # first, try to read ship_pass CSVs and collect plume files listed there
     valid_files = []
     ship_pass_dir = Path(args.ship_pass_dir)
+    plume_timestamps_csv = Path(args.plume_timestamps_csv)
     # If requested, only perform CSV sync and/or counting and exit
     if args.sync_csvs:
         update_ship_pass_csvs(ship_pass_dir, plume_root)
@@ -1978,6 +2112,9 @@ def main():
         return
     if args.count_csvs:
         count_ship_passes(ship_pass_dir)
+        return
+    if args.plot_ship_length_histograms:
+        plot_ship_length_histograms(plume_timestamps_csv)
         return
     if args.count_duplicate_mmsi:
         count_duplicate_mmsi(ship_pass_dir)
