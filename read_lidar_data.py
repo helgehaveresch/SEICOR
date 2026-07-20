@@ -137,10 +137,10 @@ def plot_height_series(ax, x_values, column_template: str, *, heights=[0,10], la
 		ax.plot(x_values, series, label=label_template.format(height=height))
 #%%
 
-path = r"D:\Lidar_IUP_20260608"
+path = r"Q:\BREDOM\SEICOR\wind_LIDAR"
 station="Wind10_1082" #switch to "Wind_1082" for 1s data
 start_date = "260518"  # yymmdd
-end_date = "260608"   # yymmdd
+end_date = "260609"   # yymmdd
 
 
 df = read_wind_ranger(
