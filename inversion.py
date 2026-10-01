@@ -30,37 +30,21 @@ def initialize_setting_and_measurement_vector(plume_measurement_file: str, plume
     ais_times = ds_plume['ship_ais_times'].values
     t_funnel = pd.to_datetime(ds_plume.attrs['t_funnel'])
     t_ais = pd.to_datetime(ds_plume.attrs['t']).tz_localize(None)
-    idx_closest_ais = np.argmin(np.abs(ais_times - np.datetime64(t_ais)))
-    idx_closest_funnel = np.argmin(np.abs(ais_times - np.datetime64(t_funnel)))
-    idx_offset = idx_closest_ais - idx_closest_funnel
     print(f"t_funnel: {t_funnel}, t_ais: {t_ais}")
-    print(f"index_offset between t_ais and t_funnel: {idx_offset} (positive means ais is later than funnel)")
-    #select ais times +/-5min around t_funnel and interpolate time and lats and lons to 1s resolution
-    time_mask = (ais_times >= (t_ais - np.timedelta64(2, 'm'))) & (ais_times <= (t_ais + np.timedelta64(4, 'm')))
-    # corrected funnel positions 
-    lats_diff, lons_diff = lats[idx_closest_funnel] - lats[idx_closest_ais], lons[idx_closest_funnel] - lons[idx_closest_ais]
-    ais_lats_sel_shifted = lats[time_mask] - lats_diff
-    ais_lons_sel_shifted = lons[time_mask] - lons_diff    
-
-    #time_mask_shifted = np.zeros_like(time_mask, dtype=bool) # this one is outdated. use the above lines instead
-    #try:
-    #    if idx_offset >= 0:
-    #        time_mask_shifted[idx_offset:] = time_mask[: time_mask.size - idx_offset]
-    #    else:
-    #        off = int(abs(idx_offset))
-    #        time_mask_shifted[: time_mask.size - off] = time_mask[off:]
-    #except Exception:
-    #    # fallback: if idx_offset not usable, keep shifted mask identical
-    #    time_mask_shifted = time_mask.copy()
-    #ais_lats_sel_shifted = lats[time_mask_shifted]
-    #ais_lons_sel_shifted = lons[time_mask_shifted]
-
-    ais_times_sel = ais_times[time_mask]
-
+    # shift the AIS track in time by (t_funnel - t_ais) so that the ship position at t_ais is placed exactly at t_funnel
+    # (ship position at time t is the AIS position at t - dt_shift)
+    dt_shift = np.timedelta64(t_funnel - t_ais)
+    print(f"AIS time shift t_funnel - t_ais: {dt_shift / np.timedelta64(1, 's'):.1f} s")
+    ais_times_shifted = ais_times + dt_shift
+    time_mask = (ais_times_shifted >= (t_ais - np.timedelta64(2, 'm'))) & (ais_times_shifted <= (t_ais + np.timedelta64(4, 'm')))
+    # AIS contains duplicate timestamps -> drop them before interpolation
+    ais_times_sel, idx_unique = np.unique(ais_times_shifted[time_mask], return_index=True)
+    ais_lats_sel_shifted = lats[time_mask][idx_unique]
+    ais_lons_sel_shifted = lons[time_mask][idx_unique]
 
     ais_times_interp = np.arange(ais_times_sel[0], ais_times_sel[-1] + np.timedelta64(2, 's'), np.timedelta64(2, 's'))
     ais_lats_interp = np.interp(ais_times_interp.astype('int64'), ais_times_sel.astype('int64'), ais_lats_sel_shifted)
-    ais_lons_interp = np.interp(ais_times_interp.astype('int64'), ais_times_sel.astype('int64'), ais_lons_sel_shifted)    
+    ais_lons_interp = np.interp(ais_times_interp.astype('int64'), ais_times_sel.astype('int64'), ais_lons_sel_shifted)
     #calculate u, v wind from ds_plume["wind_dir_insitu"] and ds_plume["wind_speed_insitu"]
     wind_dir = ds_plume["wind_dir_insitu"].values
     wind_speed = ds_plume["wind_speed_insitu"].values
@@ -68,7 +52,7 @@ def initialize_setting_and_measurement_vector(plume_measurement_file: str, plume
     wind_dir_rad = np.deg2rad(wind_dir)
     u_wind = wind_speed * np.sin(wind_dir_rad)
     v_wind = wind_speed * np.cos(wind_dir_rad)
-    #interpolate wind 
+    #interpolate wind
     times_insitu = ds_plume['insitu_times'].values
     u_wind_interp = np.interp(ais_times_interp.astype('int64'), times_insitu.astype('int64'), u_wind)
     v_wind_interp = np.interp(ais_times_interp.astype('int64'), times_insitu.astype('int64'), v_wind)
@@ -408,33 +392,16 @@ def initialize_setting_and_measurement_vector_hacky(plume_measurement_file: str,
     ais_times = ds_plume_2['ship_ais_times'].values
     t_funnel = pd.to_datetime(ds_plume.attrs['t_funnel']) + pd.Timedelta(seconds=2)
     t_ais = pd.to_datetime(ds_plume_2.attrs['t']).tz_localize(None)
-    idx_closest_ais = np.argmin(np.abs(ais_times - np.datetime64(t_ais)))
-    idx_closest_funnel = np.argmin(np.abs(ais_times - np.datetime64(t_funnel)))
-    idx_offset = idx_closest_ais - idx_closest_funnel
     print(f"t_funnel: {t_funnel}, t_ais: {t_ais}")
-    print(f"index_offset between t_ais and t_funnel: {idx_offset} (positive means ais is later than funnel)")
-    #select ais times +/-5min around t_funnel and interpolate time and lats and lons to 1s resolution
-    time_mask = (ais_times >= (t_ais - np.timedelta64(2, 'm'))) & (ais_times <= (t_ais + np.timedelta64(4, 'm')))
-    # corrected funnel positions 
-    lats_diff, lons_diff = lats[idx_closest_funnel] - lats[idx_closest_ais], lons[idx_closest_funnel] - lons[idx_closest_ais]
-    ais_lats_sel_shifted = lats[time_mask] - lats_diff
-    ais_lons_sel_shifted = lons[time_mask] - lons_diff    
-
-    #time_mask_shifted = np.zeros_like(time_mask, dtype=bool) # this one is outdated. use the above lines instead
-    #try:
-    #    if idx_offset >= 0:
-    #        time_mask_shifted[idx_offset:] = time_mask[: time_mask.size - idx_offset]
-    #    else:
-    #        off = int(abs(idx_offset))
-    #        time_mask_shifted[: time_mask.size - off] = time_mask[off:]
-    #except Exception:
-    #    # fallback: if idx_offset not usable, keep shifted mask identical
-    #    time_mask_shifted = time_mask.copy()
-    #ais_lats_sel_shifted = lats[time_mask_shifted]
-    #ais_lons_sel_shifted = lons[time_mask_shifted]
-
-    ais_times_sel = ais_times[time_mask]
-
+    # shift the AIS track in time by (t_funnel - t_ais) so that the ship position at t_ais is placed exactly at t_funnel
+    dt_shift = np.timedelta64(t_funnel - t_ais)
+    print(f"AIS time shift t_funnel - t_ais: {dt_shift / np.timedelta64(1, 's'):.1f} s")
+    ais_times_shifted = ais_times + dt_shift
+    time_mask = (ais_times_shifted >= (t_ais - np.timedelta64(2, 'm'))) & (ais_times_shifted <= (t_ais + np.timedelta64(4, 'm')))
+    # AIS contains duplicate timestamps -> drop them before interpolation
+    ais_times_sel, idx_unique = np.unique(ais_times_shifted[time_mask], return_index=True)
+    ais_lats_sel_shifted = lats[time_mask][idx_unique]
+    ais_lons_sel_shifted = lons[time_mask][idx_unique]
 
     ais_times_interp = np.arange(ais_times_sel[0], ais_times_sel[-1] + np.timedelta64(2, 's'), np.timedelta64(2, 's'))
     ais_lats_interp = np.interp(ais_times_interp.astype('int64'), ais_times_sel.astype('int64'), ais_lats_sel_shifted)
