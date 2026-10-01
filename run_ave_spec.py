@@ -22,9 +22,9 @@ pix_to_fiber = np.array(pix_to_fiber)
 Pantilt_vea = 105.9
 vea_fiber = Pantilt_vea + vea_fiber
 #%%
-for i in range(1, 42):
+for i in range(1, 41):
         string=f"{i:02d}"
-        subprocess.run(r'P:\exe\ave_spec.exe P:\data\wedel\pc\APR2025\250404ID.PC{} P:\data\wedel\pc\APR2025\250404_D.AV{} 60 /l 180'.format(string, string))
+        #subprocess.run(r'P:\exe\ave_spec.exe P:\data\wedel\pc\APR2025\250404ID.PC{} P:\data\wedel\pc\APR2025\250404_D.AV{} 60 /l 180'.format(string, string))
         subprocess.run(r'P:\exe\ave_spec.exe P:\data\wedel\pc\APR2025\250404ID.PC{} P:\data\wedel\pc\APR2025\250404ID.AV{} 5 /l {}'.format(string, string,vea_fiber[i-1]))
     
 # %%
