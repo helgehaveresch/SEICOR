@@ -12,6 +12,26 @@ processing:
   fiber_to_VEA: /path/to/fiber_to_VEA.fits
   hg_cd_file: /path/to/hg-cd.fits
   do_smear_correction: False
+  smear_correction:
+    t_sh: 3.689655172413793e-07
+    t_v: 1.586206896551724e-07
+    t_sv: 8.448275862068966e-06
+    t_shd: 2.6344827586206892e-08
+    t_skip: 1.52e-05
+    t_expos_offset_per_exposure:
+      0.025: 0.010832530052594902
+      0.05: 0.011299467608666309
+      0.1: 0.018606047201570886
+      0.2: 0.018240179938966608
+      0.4: 0.015623832006738624
+      0.8: 0.011744533603522917
+      1.6: 0.00018033765486741635
+    x_binned: 2
+    nx_lead: 0
+    nx_trail: 0
+    y_binned: 2
+    ny_lead: 62
+    ny_trail: 46
   calibration: 
     do_spectral_calibration: True
     a0: 3.86200E+0002
