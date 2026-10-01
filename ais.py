@@ -441,6 +441,12 @@ def filter_ship_passes(df_ais, ship_groups, filtered_ship_groups, start_time, en
                     })
         else:
             df_ais.loc[group.index, "filtermask"] = 6  # no close positions
+    if not ship_passes:
+        raise RuntimeError(
+            f"No ship passes found between {start_time} and {end_time} "
+            f"({len(df_ais)} AIS records, {len(filtered_ship_groups)} ships after pre-filtering). "
+            f"AIS data may be missing for this date."
+        )
     ship_passes = sorted(ship_passes, key=lambda x: pd.to_datetime(x["UTC_Time"]))
     df_ship_passes = pd.DataFrame(ship_passes)
     df_ship_passes["Plume_number"] = df_ship_passes.index
