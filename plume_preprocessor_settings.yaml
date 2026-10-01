@@ -10,9 +10,12 @@ Instruments: #relative to base_paths
   do_reference_correction: true
   SC_reference_offset_correction_files: "_D.NO2_VIS_fix_ref_250907"
   lp_doas_dir: "Open_Path/SpectralAnalysis/results"
-  in_situ_path: "InSitu"
+  in_situ_path: "InSitu/HORIBA"
+  airpointer_path: "InSitu/Airpointer" # wind is taken from the Airpointer, gases from the HORIBA
+  meteomast_path: "weatherstations/Billwerder" # Uni Hamburg meteomast, wind at 50/110/175/280 m
+  median_wind_file: "weatherstations/Median_winddata/median_winddata_hourly.csv" # hourly median wind of the weather stations (currently not used)
   ais_dir: "AIS"
-  img_dir: "video" # directory containing daily zipped video files
+  img_dir: "IMPACT/video" # directory containing daily zipped video files
   weather_stations_dir: "weatherstations"
   instrument_location:
     - 53.56958522848946
@@ -46,8 +49,36 @@ processing:
     polynomial_background_degree: 8
     calculate_high_pass_fft_background: true
     high_pass_filter_time_period: 3000 # in seconds
-    run_upwind_doas_fit: true
+    run_upwind_doas_fit: false
     nlin_param_file: pars/nlin_d/SEICOR_D_offaxis.NO2_VIS_upwind
+
+  plume_window: # time window around the ship pass that is stored and analysed
+    before_minutes: 1
+    after_minutes: 3
+
+  reference_search: # clean up- and downwind reference windows (enhancements.find_reference_window)
+    start_offset_minutes: 2 # upwind: first try starts this long before the pass; downwind: this long after the end of the plume window
+    search_minutes: 60 # search up to this far from the pass, in 1 min steps
+    window_minutes: 1 # length of the reference window
+    min_count: 100 # minimum number of measurements in the reference window
+    min_span_seconds: 40 # minimum time covered by these measurements
+    other_ship_minutes: 5 # no other ship pass within this time of the reference window
+    ztest_p_threshold: 0.15 # z-test that must find no plume in the reference window
+    ztest_min_cluster_size: 20
+
+  detection: # plume / ship flag (plumes.sort_plumes)
+    p_threshold_plume: 0.03
+    p_threshold_ship: 0.02
+    time_tolerance_seconds: 50 # searched within +- this time around the pass
+    plume_rows: [8, 20] # image rows (VEA) searched for the plume, python slice [start, stop)
+    ship_rows: [4, 10] # image rows searched for the ship itself
+
+  plume_mask: # plume_mask stored in the plume files (only for passes with a plume or ship found)
+    p_threshold: 0.20
+    min_cluster_size: 5
+    kernel_arm: 1
+    connectivity: 1
+    require_connection: true
 
 Output:
   plots_out_dir: "analysis_5"
