@@ -1,10 +1,10 @@
 global:
-  path_to_data: C:\Users\hhave\Nextcloud\Promotion\data
+  path_to_data: Q:\BREDOM\SEICOR\IMPACT\org\APR2025
   path_to_repo: C:\Users\hhave\Documents\Promotion\scripts
 
 processing:
   do_dark_correction: TRUE
-  dark_file: P:\data\data_tmp\org\APR2025\250401ND.IMG
+  dark_file: Q:\BREDOM\SEICOR\IMPACT\org\APR2025\250401ND.IMG
   dark_file_n_spatial: 232
   do_spatial_calibration: True
   fiber_to_pixel: C:\Users\hhave\Documents\Promotion\scripts\SEICOR\fiber_to_pixel_SEICOR.txt
