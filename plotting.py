@@ -597,7 +597,13 @@ def plot_single_ship(
         pos = ax2.get_position()
         ax2.set_position([pos.x0, pos.y0, pos.width * 0.8, pos.height])
 
-        plt.show()
+        if save_fig:
+            savepath = os.path.join(save_dir, f"NO2_combined_{timestamp.strftime('%Y%m%d_%H%M%S')}_{mmsi}.png")
+            os.makedirs(os.path.dirname(savepath), exist_ok=True)
+            fig.savefig(savepath)
+            plt.close(fig)
+        else:
+            plt.show()
 
     else:
         raise ValueError("mode must be one of: 'dSCD', 'enhancement', 'integrated', 'combined'")
@@ -901,11 +907,10 @@ def plot_ship_pass_subplot_v2(
         times_dt = pd.to_datetime(ds_plume["times_plume"])
     times_index = pd.to_datetime(times_dt)
 
-    times_insitu = pd.to_datetime(ds_plume.insitu_times.values)
-    try:
-        insitu_tz = times_insitu.tz
-    except Exception:
-        insitu_tz = None
+    # in-situ data is missing in plume files with insitu_available = 0
+    has_insitu = "insitu_times" in ds_plume.coords
+    times_insitu = pd.to_datetime(ds_plume.insitu_times.values) if has_insitu else None
+    insitu_tz = getattr(times_insitu, "tz", None)
     if insitu_tz is not None:
         if getattr(times_index, 'tz', None) is None:
             try:
@@ -961,8 +966,8 @@ def plot_ship_pass_subplot_v2(
 
     # Video image
     ax2 = fig.add_subplot(gs[0, 2])
-    img_file = (img_dir / img_file)
-    if img_file:
+    if img_file is not None:
+        img_file = img_dir / img_file
         fname = os.path.basename(img_file)
         fdir = os.path.dirname(img_file)
         zip_candidate = fdir + ".zip"
@@ -1119,29 +1124,29 @@ def plot_ship_pass_subplot_v2(
 
     ax4 = fig.add_subplot(gs[0, 4])
 
-    # Ensure in-situ comparison uses the same (naive) datetime objects
-    # times (python datetimes) was created above and normalized to tz-naive UTC
-    in_situ_mask = (times_insitu >= times[0]) & (times_insitu <= times[-1])    
-    in_situ_times = times_insitu[in_situ_mask]
-    in_situ_no2 = ds_plume['no2_insitu'][in_situ_mask]
-    
+    # IMPACT in ppb needs the in-situ air density, so it is only computed with in-situ data
+    if has_insitu:
+        # Ensure in-situ comparison uses the same (naive) datetime objects
+        # times (python datetimes) was created above and normalized to tz-naive UTC
+        in_situ_mask = (times_insitu >= times[0]) & (times_insitu <= times[-1])
+        in_situ_times = times_insitu[in_situ_mask]
 
-    L = 870  # meters
+        L = 870  # meters
 
-    # Interpolate n_air to times_window
-    n_air = ds_plume["p_0_insitu"][in_situ_mask] * 1e2 * 6.02214076e23 / (ds_plume["T_out_insitu"][in_situ_mask] + 273.15) / 8.314
-    n_air_interp = pd.Series(n_air.values, index=pd.to_datetime(in_situ_times))
-    # Use the pandas DatetimeIndex for reindexing (preserves tz-awareness)
-    try:
-        n_air_aligned = n_air_interp.reindex(times_index, method='nearest').values
-    except Exception:
-        # Fallback: reindex using the python datetime array
-        n_air_aligned = n_air_interp.reindex(pd.DatetimeIndex(times), method='nearest').values
+        # Interpolate n_air to times_window
+        n_air = ds_plume["p_0_insitu"][in_situ_mask] * 1e2 * 6.02214076e23 / (ds_plume["T_out_insitu"][in_situ_mask] + 273.15) / 8.314
+        n_air_interp = pd.Series(n_air.values, index=pd.to_datetime(in_situ_times))
+        # Use the pandas DatetimeIndex for reindexing (preserves tz-awareness)
+        try:
+            n_air_aligned = n_air_interp.reindex(times_index, method='nearest').values
+        except Exception:
+            # Fallback: reindex using the python datetime array
+            n_air_aligned = n_air_interp.reindex(pd.DatetimeIndex(times), method='nearest').values
 
-    # IMPACT: n_NO2 = no2_data / (L * n_air) * 1e9
-    # Apply rolling mean over 20 dim_0 (time) for IMPACT
-    impact_enh_rolling = ds_plume["no2_enhancement_c_back"].isel(image_row=slice(5,9)).mean(dim="image_row").rolling(window_plume=20, center=True).mean()
-    n_NO2_impact = impact_enh_rolling * 1e4 / (L * n_air_aligned) * 1e9
+        # IMPACT: n_NO2 = no2_data / (L * n_air) * 1e9
+        # Apply rolling mean over 20 dim_0 (time) for IMPACT
+        impact_enh_rolling = ds_plume["no2_enhancement_c_back"].isel(image_row=slice(5,9)).mean(dim="image_row").rolling(window_plume=20, center=True).mean()
+        n_NO2_impact = impact_enh_rolling * 1e4 / (L * n_air_aligned) * 1e9
 
     # Convert LP-DOAS times to matplotlib date numbers for consistent plotting
     lp_available = ("lp_times_window_365" in ds_plume) and ("lp_no2_enhancement" in ds_plume)
@@ -1166,8 +1171,11 @@ def plot_ship_pass_subplot_v2(
         else:
             lp_times_num = np.array([])
 
-    # Plot IMPACT (always)
-    ax4.plot(times_num, n_NO2_impact, color='orange', label="IMPACT n$_{NO_2}$ [ppb] (rolling mean)")
+    # Plot IMPACT (only with in-situ data, see above)
+    if has_insitu:
+        ax4.plot(times_num, n_NO2_impact, color='orange', label="IMPACT n$_{NO_2}$ [ppb] (rolling mean)")
+    else:
+        ax4.text(0.5, 0.5, "No in-situ data:\nIMPACT not converted to ppb", ha="center", va="center", transform=ax4.transAxes)
 
     # Plot LP-DOAS only if available and there are times
     if lp_available and lp_times_num.size > 0:
@@ -1224,8 +1232,13 @@ def plot_no2_enhancements_for_all_ships_full_overview(path_ship_passes, img_dir,
         if not os.path.isfile(ship_pass_single['plume_file']):
             print(f"Plume file {ship_pass_single['plume_file']} does not exist. Skipping.")
             continue
-        ds_plume = xr.open_dataset(ship_pass_single['plume_file'])
-        plot_ship_pass_subplot_v2(ds_plume, ship_pass_single, img_dir, out_dir, lat1, lon1, lat2, lon2, save=True)
+        # one failing pass only costs its own plot
+        try:
+            with xr.open_dataset(ship_pass_single['plume_file']) as ds_plume:
+                plot_ship_pass_subplot_v2(ds_plume, ship_pass_single, img_dir, out_dir, lat1, lon1, lat2, lon2, save=True)
+        except Exception as e:
+            print(f"Overview plot failed for MMSI {ship_pass_single['MMSI']} at {idx}: {type(e).__name__}: {e}")
+            plt.close("all")
 
 
 
