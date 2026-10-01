@@ -6,6 +6,7 @@ import pandas as pd
 import os
 from scipy import ndimage
 from scipy.stats import norm
+import SEICOR.in_situ
 # %%
 def add_ship_trajectory_to_plume_ds(ds_plume, filtered_ship_groups):
     group = filtered_ship_groups.get(int(ds_plume.mmsi))
@@ -31,9 +32,11 @@ def add_ship_trajectory_to_plume_ds(ds_plume, filtered_ship_groups):
     return ds_plume
 
 def add_plume_file_paths_to_ship_passes(ship_passes, plumes_out_dir):
-    for idx, passing_ship in ship_passes.iterrows():
-        plumes_out_path = os.path.join(plumes_out_dir, f"plume_{passing_ship['Plume_number']:03d}_t_{idx.strftime('%Y%m%d_%H%M%S')}_mmsi_{passing_ship['MMSI']}.nc")
-        ship_passes.at[idx, 'plume_file'] = plumes_out_path
+    # built in row order, not by index label: two ships passing in the same second share a time index
+    ship_passes['plume_file'] = [
+        os.path.join(plumes_out_dir, f"plume_{passing_ship['Plume_number']:03d}_t_{idx.strftime('%Y%m%d_%H%M%S')}_mmsi_{passing_ship['MMSI']}.nc")
+        for idx, passing_ship in ship_passes.iterrows()
+    ]
     return ship_passes
 
 def add_insitu_to_plume_ds(ds_plume, df_insitu):
@@ -47,6 +50,9 @@ def add_insitu_to_plume_ds(ds_plume, df_insitu):
     Returns:
         xr.Dataset: The plume dataset with added in-situ data variables.
     """
+    if df_insitu is None or df_insitu.empty:
+        ds_plume.attrs["insitu_available"] = 0
+        return ds_plume
     try:
         times_dt = pd.to_datetime(ds_plume["times_plume"].values)
     except Exception:
@@ -77,7 +83,10 @@ def add_insitu_to_plume_ds(ds_plume, df_insitu):
         times_index = times_index.fillna(first_valid)
     times = times_index.to_pydatetime()
     
-    in_situ_mask = (df_insitu.index >= times[0]) & (df_insitu.index <= times[-1])    
+    in_situ_mask = (df_insitu.index >= times[0]) & (df_insitu.index <= times[-1])
+    if not in_situ_mask.any():
+        ds_plume.attrs["insitu_available"] = 0
+        return ds_plume
     in_situ_times = df_insitu.index[in_situ_mask]
     in_situ_no2 = df_insitu['c_no2'][in_situ_mask]
     
@@ -112,6 +121,16 @@ def add_insitu_to_plume_ds(ds_plume, df_insitu):
         wind_speed_insitu = (["insitu_times"], df_insitu["wind_speed"][in_situ_mask]),
     )
 
+    # meteomast wind at all heights (if read in by read_in_situ)
+    mast_heights = [h for h in SEICOR.in_situ.MAST_HEIGHTS if f"wind_speed_mast_{h}" in df_insitu.columns]
+    if mast_heights:
+        ds_plume = ds_plume.assign_coords(mast_height=("mast_height", mast_heights, {"units": "m"}))
+        ds_plume = ds_plume.assign(
+            wind_speed_mast=(["mast_height", "insitu_times"], np.stack([df_insitu[f"wind_speed_mast_{h}"][in_situ_mask].to_numpy() for h in mast_heights])),
+            wind_dir_mast=(["mast_height", "insitu_times"], np.stack([df_insitu[f"wind_dir_mast_{h}"][in_situ_mask].to_numpy() for h in mast_heights])),
+        )
+
+    ds_plume.attrs["insitu_available"] = 1
     return ds_plume
 
 
@@ -559,7 +578,14 @@ def detect_plume_ztest_left(
 
 import matplotlib.pyplot as plt
 
-def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_ship=0.3):
+def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_ship=0.3,
+                time_tolerance_seconds=50, plume_rows=(8, 20), ship_rows=(4, 10)):
+    """Flags whether a plume or, if not, the ship itself is found close to the pass time.
+
+    The plume is searched in image rows plume_rows[0]:plume_rows[1], the ship in
+    ship_rows[0]:ship_rows[1], both within +-time_tolerance_seconds of the pass time.
+    Sets ds_plume.attrs["plume_or_ship_found"] to "True"/"False".
+    """
     # prefer interpolated enhancement, fall back to c_back variant
     if 'no2_enhancement_interp' in ds_plume:
         varname = 'no2_enhancement_interp'
@@ -577,8 +603,8 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         except Exception:
             pass
 
-    slice_rows = slice(8,20)
-    tol = pd.Timedelta("50s")
+    slice_rows = slice(*plume_rows)
+    tol = pd.Timedelta(seconds=time_tolerance_seconds)
     times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
     t0 = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
     win_mask = (times >= (t0 - tol)) & (times <= (t0 + tol))
@@ -643,8 +669,8 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         plt.savefig(savepath)
     plt.close('all')
     if plume_found == False:
-        slice_rows = slice(4,10)
-        tol = pd.Timedelta("50s")
+        slice_rows = slice(*ship_rows)
+        tol = pd.Timedelta(seconds=time_tolerance_seconds)
         times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
         t0 = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
         win_mask = (times >= (t0 - tol)) & (times <= (t0 + tol))
