@@ -1216,8 +1216,8 @@ def prepare_station_data(times, speeds=None, directions=None,
 finkenwerder_hourly = load_weather_data_csv(finkenwerder_path)
 mittelnkirchen_hourly = load_weather_data_csv(mittelnkirchen_path)
 york_hourly = load_weather_data_csv(york_path)
-horiba_insitu = read_all_horiba_(horiba_dir)
-airpointer_insitu = load_and_stack_csvs(airpointer_dir, prefix="202506", recursive=True).rename(columns={"Time": "time"})
+#horiba_insitu = read_all_horiba_(horiba_dir)
+#airpointer_insitu = load_and_stack_csvs(airpointer_dir, prefix="202506", recursive=True).rename(columns={"Time": "time"})
 #%%
 
 minutely_time_mez = pd.date_range(start="2025-03-01 00:00", end="2025-10-31 23:59", freq="min", tz="Europe/Berlin")
@@ -1243,18 +1243,18 @@ billwerder_hourly = (billwerder_minutely.replace(99999, np.nan).resample("h").me
 finkenwerder_hourly = ensure_utc_time_column(finkenwerder_hourly, col="time")
 mittelnkirchen_hourly = ensure_utc_time_column(mittelnkirchen_hourly, col="time")
 york_hourly = ensure_utc_time_column(york_hourly, col="time")
-airpointer_insitu = ensure_utc_time_column(airpointer_insitu, col="time")
+#airpointer_insitu = ensure_utc_time_column(airpointer_insitu, col="time")
 time_col = "time" 
-airpointer_insitu[time_col] = pd.to_datetime(airpointer_insitu[time_col], errors="coerce")
-airpointer_insitu = airpointer_insitu.dropna(subset=[time_col])
-airpointer_insitu = airpointer_insitu.set_index(time_col)
-airpointer_insitu = airpointer_insitu.replace(-9999, np.nan)
+#airpointer_insitu[time_col] = pd.to_datetime(airpointer_insitu[time_col], errors="coerce")
+#airpointer_insitu = airpointer_insitu.dropna(subset=[time_col])
+#airpointer_insitu = airpointer_insitu.set_index(time_col)
+#airpointer_insitu = airpointer_insitu.replace(-9999, np.nan)
 
 finkenwerder_hourly = calc_u_v_wind(finkenwerder_hourly, convert_speed_to_mps=True)
 mittelnkirchen_hourly = calc_u_v_wind(mittelnkirchen_hourly, convert_speed_to_mps=True)
 york_hourly = calc_u_v_wind(york_hourly, convert_speed_to_mps=True)
-airpointer_insitu = calc_u_v_wind(airpointer_insitu, variable_speed='wind_speed', variable_direction='wind_direction_corr', convert_speed_to_mps=False)
-horiba_insitu = calc_u_v_wind(horiba_insitu, variable_speed='wind_speed', variable_direction='wind_dir')
+#airpointer_insitu = calc_u_v_wind(airpointer_insitu, variable_speed='wind_speed', variable_direction='wind_direction_corr', convert_speed_to_mps=False)
+#horiba_insitu = calc_u_v_wind(horiba_insitu, variable_speed='wind_speed', variable_direction='wind_dir')
 billwerder_hourly = calc_u_v_wind(billwerder_hourly, 
                                   variable_speed_list= ["wind_speed_50", "wind_speed_110", "wind_speed_175", "wind_speed_280"], 
                                   variable_dir_list= ["wind_dir_50", "wind_dir_110", "wind_dir_175", "wind_dir_280"], 
@@ -1266,16 +1266,16 @@ billwerder_minutely = calc_u_v_wind(billwerder_minutely,
                                   output_list_u= ["u_wind_50", "u_wind_110", "u_wind_175", "u_wind_280"], 
                                   output_list_v= ["v_wind_50", "v_wind_110", "v_wind_175", "v_wind_280"])
 
-airpointer_hourly = (airpointer_insitu.resample("h").mean(numeric_only=True).reset_index())
+#airpointer_hourly = (airpointer_insitu.resample("h").mean(numeric_only=True).reset_index())
 
 
-horiba_insitu.index = pd.to_datetime(horiba_insitu.index, errors='coerce')
-horiba_insitu = horiba_insitu[~horiba_insitu.index.isna()]
-horiba_insitu = horiba_insitu.replace(-9999, np.nan)
-horiba_hourly = (horiba_insitu.resample('h').mean(numeric_only=True).reset_index())
+#horiba_insitu.index = pd.to_datetime(horiba_insitu.index, errors='coerce')
+#horiba_insitu = horiba_insitu[~horiba_insitu.index.isna()]
+#horiba_insitu = horiba_insitu.replace(-9999, np.nan)
+#horiba_hourly = (horiba_insitu.resample('h').mean(numeric_only=True).reset_index())
 
-airpointer_hourly = calc_speed_dir_wind(airpointer_hourly, variable_u='u_wind', variable_v='v_wind')
-horiba_hourly = calc_speed_dir_wind(horiba_hourly, variable_u='u_wind', variable_v='v_wind')
+#airpointer_hourly = calc_speed_dir_wind(airpointer_hourly, variable_u='u_wind', variable_v='v_wind')
+#horiba_hourly = calc_speed_dir_wind(horiba_hourly, variable_u='u_wind', variable_v='v_wind')
 billwerder_hourly = calc_speed_dir_wind(billwerder_hourly, 
                                         variable_u_list= ["u_wind_50", "u_wind_110", "u_wind_175", "u_wind_280"], 
                                         variable_v_list= ["v_wind_50", "v_wind_110", "v_wind_175", "v_wind_280"], 
