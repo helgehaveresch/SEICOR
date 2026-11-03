@@ -6,8 +6,8 @@ base_paths:
 
 Instruments: #relative to base_paths
   IMPACT_SC_path: "IMPACT/SLANT_25" #month folder is added automatically using the date
-  IMPACT_SC_file_ending: "ID.NO2_VIS_fix_ref_250907"
-  do_reference_correction: true
+  IMPACT_SC_file_ending: "ID.NO2_VIS_daily_ref"
+  do_reference_correction: false
   SC_reference_offset_correction_files: "_D.NO2_VIS_fix_ref_250907"
   lp_doas_dir: "Open_Path/SpectralAnalysis/results"
   in_situ_path: "InSitu/HORIBA"
@@ -81,10 +81,10 @@ processing:
     require_connection: true
 
 Output:
-  plots_out_dir: "analysis_5"
+  plots_out_dir: "analysis"
   img_out_dir: "video_5"
-  ship_passes_out_dir: "ship_passes_5"
-  plume_out_dir: "plumes_5"
+  ship_passes_out_dir: "ship_passes"
+  plume_out_dir: "plumes"
 
 Plotting:
   generate_plots: true

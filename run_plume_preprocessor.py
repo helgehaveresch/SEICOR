@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import os
 
-def make_date_list(start_str='250326', end_str='250910'):
+def make_date_list(start_str='250326', end_str='250531'):
     start = datetime.strptime(start_str, '%y%m%d').date()
     end = datetime.strptime(end_str, '%y%m%d').date()
     dates = []
