@@ -36,6 +36,7 @@ import SEICOR.plotting
 import SEICOR.plumes
 import SEICOR.wind
 import SEICOR.era5
+import SEICOR.lidar
 
 with open(SETTINGS_PATH, "r") as file:
     settings = yaml.safe_load(file)
@@ -118,7 +119,7 @@ except Exception as e:
     era5_profile = None
 #%% Initialize flip-corrected LIDAR wind (written by wind_model_meteomast_lidar_comparison.py, 2026 only)
 try:
-    df_lidar = SEICOR.plumes.read_lidar_corrected(Path(settings["bredom_paths"][_plat_key]) / instrument_settings["lidar_file"])
+    df_lidar = SEICOR.lidar.read_lidar_corrected(Path(settings["bredom_paths"][_plat_key]) / instrument_settings["lidar_file"])
 except Exception as e:
     print("Error reading LIDAR:", e)
     traceback.print_exc()
@@ -245,7 +246,7 @@ for pos, (idx, ship_pass_single) in enumerate(ship_passes.iterrows()):
                 SEICOR.plotting.plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date)
                 SEICOR.plotting.plot_reference_image_with_plume_mask(ds_plume, out_dir, date)
         ds_plume = SEICOR.era5.add_era5_to_plume_ds(ds_plume, era5_profile, instrument_settings["era5_max_height_m"])
-        ds_plume = SEICOR.plumes.add_lidar_to_plume_ds(ds_plume, df_lidar)
+        ds_plume = SEICOR.lidar.add_lidar_to_plume_ds(ds_plume, df_lidar)
         ds_plume.to_netcdf(Path(ship_pass_single['plume_file']), mode="w")
         # record result back into ship_passes dataframe so it can be saved
         ship_passes.iat[pos, ship_passes.columns.get_loc('plume_or_ship_found')] = ds_plume.attrs.get('plume_or_ship_found', 'False')
