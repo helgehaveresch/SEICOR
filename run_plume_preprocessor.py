@@ -15,13 +15,13 @@ def make_date_list(start_str='250326', end_str='250531'):
         cur += timedelta(days=1)
     return dates
 
-date_list_orig = make_date_list('250326', '250910')
+date_list_orig = make_date_list('250326', '260611')
 
 def run_for_date(date):
     print(f"[PID {os.getpid()}] Running plume_preprocessor for date: {date}")
     try:
         cp = subprocess.run(
-            ['python3', 'scripts/SEICOR/plume_preprocessor.py', date],
+            ['python3', str(Path(__file__).resolve().with_name('plume_preprocessor.py')), date],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True
@@ -33,7 +33,7 @@ def run_for_date(date):
         return date, 1
 
 if __name__ == '__main__':
-    processes = 4
+    processes = 20
     with multiprocessing.Pool(processes=processes) as pool:
         try:
             results = pool.map(run_for_date, date_list_orig)

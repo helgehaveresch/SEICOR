@@ -48,7 +48,7 @@ if len(sys.argv) > 1:
     date = sys.argv[1]
 instrument_settings     = settings["Instruments"]
 processing_settings     = settings["processing"]
-IMPACT_path             = (BASEPATH / instrument_settings["IMPACT_SC_path"] / get_month_folder(date))
+IMPACT_path             = (BASEPATH / instrument_settings["IMPACT_SC_path"].format(yy=date[:2]) / get_month_folder(date))
 IMPACT_SC_file_ending   = instrument_settings["IMPACT_SC_file_ending"]
 do_ref_correction       = instrument_settings["do_reference_correction"]
 SC_ref_offset_corr      = instrument_settings["SC_reference_offset_correction_files"]
