@@ -5,6 +5,8 @@ import xarray as xr
 import pandas as pd
 import os
 from scipy import ndimage
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy.stats import norm
 import SEICOR.in_situ
 # %%
@@ -134,6 +136,51 @@ def add_insitu_to_plume_ds(ds_plume, df_insitu):
     return ds_plume
 
 
+def _local_nanmean(arr, footprint):
+    """Mean over the footprint around each pixel, ignoring NaNs and pixels outside the image;
+    NaN where the footprint contains no valid pixel."""
+    weights = footprint.astype(float)
+    valid = ~np.isnan(arr)
+    total = ndimage.convolve(np.where(valid, arr, 0.0), weights, mode="constant", cval=0.0)
+    count = ndimage.convolve(valid.astype(float), weights, mode="constant", cval=0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return total / count
+
+
+def _merge_nearby_clusters(labeled, keep_labels, seed_label, seconds, max_gap_seconds, max_row_distance, max_extension_seconds=None):
+    """Give seed_label to the clusters connected to it: on rows at most max_row_distance apart, they are
+    at most max_gap_seconds apart in time (seconds: time of each column), also as a chain over other clusters.
+    A cluster reaching more than max_extension_seconds before or after the seed cluster is not merged,
+    and the chain does not continue over it."""
+    keep_labels = np.asarray(keep_labels)
+    n_rows = labeled.shape[0]
+    first = np.full((keep_labels.size, n_rows), np.inf)
+    last = np.full((keep_labels.size, n_rows), -np.inf)
+    for i, lab in enumerate(keep_labels):
+        rows, cols = np.nonzero(labeled == lab)
+        np.minimum.at(first[i], rows, seconds[cols])
+        np.maximum.at(last[i], rows, seconds[cols])
+
+    # time distance of each pair of clusters: smallest over all pairs of similar rows, <= 0 if they overlap in time
+    close = np.zeros((keep_labels.size, keep_labels.size), dtype=bool)
+    for shift in range(-max_row_distance, max_row_distance + 1):
+        rows_a = np.arange(max(0, -shift), min(n_rows, n_rows - shift))
+        rows_b = rows_a + shift
+        distance = np.maximum(first[:, None, rows_b] - last[None, :, rows_a],
+                              first[None, :, rows_a] - last[:, None, rows_b])
+        close |= (distance <= max_gap_seconds).any(axis=2)
+
+    seed = int(np.flatnonzero(keep_labels == seed_label)[0])
+    if max_extension_seconds is not None:
+        within = (first.min(axis=1) >= first[seed].min() - max_extension_seconds) & (last.max(axis=1) <= last[seed].max() + max_extension_seconds)
+        close &= within[:, None] & within[None, :]
+
+    _, groups = connected_components(csr_matrix(close), directed=False)
+    merged = labeled.copy()
+    merged[np.isin(labeled, keep_labels[groups == groups[seed]])] = seed_label
+    return merged
+
+
 def _detect_plume_ztest_core(
     image,
     bg_mean,
@@ -151,6 +198,12 @@ def _detect_plume_ztest_core(
     viewdir_max=18,
     keep_second_largest=False,
     second_size_threshold=None,
+    # option to merge clusters close in time on similar rows (needs ds_plume for the times)
+    merge_max_gap_seconds=None,
+    merge_max_row_distance=2,
+    merge_min_cluster_size=40,
+    merge_max_cluster_size=None,
+    merge_max_extension_minutes=None,
 ):
     if image.ndim != 2:
         raise ValueError("image must be 2D")
@@ -169,14 +222,7 @@ def _detect_plume_ztest_core(
         footprint[c, c + a] = True
         footprint[c, c - a] = True
 
-    # compute neighborhood mean while ignoring NaNs
-    def local_mean(arr, footprint):
-        def _func(values):
-            vals = values[~np.isnan(values)]
-            return vals.mean() if vals.size else np.nan
-        return ndimage.generic_filter(arr, _func, footprint=footprint, mode="constant", cval=np.nan)
-
-    neigh_mean = local_mean(image, footprint)
+    neigh_mean = _local_nanmean(image, footprint)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         z = (neigh_mean - bg_mean) / bg_std
@@ -234,6 +280,22 @@ def _detect_plume_ztest_core(
 
         if source_mask.shape != image.shape:
             raise ValueError("time_grid and viewdir_grid must have same shape as image")
+
+    # merge the neighbouring clusters into the cluster that the selection below would pick without merging
+    if merge_max_gap_seconds is not None:
+        seed_labels = [lab for lab in keep_labels if not require_connection or np.any((labeled == lab) & source_mask)]
+        max_size = np.inf if merge_max_cluster_size is None else merge_max_cluster_size
+        merge_labels = [lab for lab in keep_labels if merge_min_cluster_size <= sizes[lab - 1] <= max_size]
+        seed_label = max(seed_labels, key=lambda lab: sizes[lab - 1], default=None)
+        if seed_label in merge_labels and len(merge_labels) > 1:
+            times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
+            seconds = np.asarray((times - times[0]).total_seconds(), dtype=float)
+            max_extension_seconds = None if merge_max_extension_minutes is None else 60.0 * merge_max_extension_minutes
+            labeled = _merge_nearby_clusters(labeled, merge_labels, seed_label, seconds, merge_max_gap_seconds,
+                                             merge_max_row_distance, max_extension_seconds)
+            sizes = ndimage.sum(mask, labeled, range(1, ncomp + 1))
+            keep_labels = np.unique(labeled[np.isin(labeled, keep_labels)]).tolist()
+
     # filter clusters by min size first
     mask_filtered = np.isin(labeled, keep_labels)
 
@@ -367,16 +429,27 @@ def detect_plume_ztest_iterative(
     ship_connectivity=1,
     max_iter=10,
     stop_pixels=15,
+    bg_extra=None,
+    verbose=False,
+    merge_max_gap_seconds=None,
+    merge_max_row_distance=2,
+    merge_min_cluster_size=40,
+    merge_max_cluster_size=None,
+    merge_max_extension_minutes=None,
 ):
     """
     Iterative neighborhood Z-test.
 
-    If bg_mean/bg_std are omitted, the image is repeatedly background-estimated
-    after masking the previous iteration's plume pixels. The plume test itself
-    always runs on the original image; only the background statistics are updated.
-    Ship pixels are detected in each iteration as well, and the working image is
-    masked by the union of plume and ship masks. The loop stops when the union
-    mask changes by at most stop_pixels or max_iter is reached.
+    Each iteration detects plume pixels (right-sided test, _detect_plume_ztest_core) and
+    ship pixels (left-sided test, detect_plume_ztest_left) on the original image. The
+    background mean/std of the next iteration are then estimated from the image with the
+    union of plume and ship pixels masked out, plus the pixels in bg_extra (e.g. the
+    reference images). The loop stops when the union mask changes by at most stop_pixels,
+    nothing is detected, or max_iter is reached.
+
+    If bg_mean/bg_std are given, they are used for the first iteration only (e.g. the
+    statistics of the reference images); otherwise the first iteration estimates them from
+    the full image (plus bg_extra).
 
     Returns:
         plume_mask, ship_mask, plume_masks, ship_masks
@@ -387,57 +460,36 @@ def detect_plume_ztest_iterative(
     """
     if image.ndim != 2:
         raise ValueError("image must be 2D")
-    
-    if bg_mean is not None and bg_std is not None:
-        plume_mask = _detect_plume_ztest_core(
-            image,
-            bg_mean=bg_mean,
-            bg_std=bg_std,
-            p_threshold=p_threshold,
-            min_cluster_size=min_cluster_size,
-            kernel_arm=kernel_arm,
-            median_kernel_arm=median_kernel_arm,
-            connectivity=connectivity,
-            require_connection=require_connection,
-            ds_plume=ds_plume,
-            time_tol_seconds=time_tol_seconds,
-            viewdir_min=viewdir_min,
-            viewdir_max=viewdir_max,
-            keep_second_largest=keep_second_largest,
-            second_size_threshold=second_size_threshold,
-        )
-        ship_mask = detect_plume_ztest_left(
-            image,
-            p_threshold=ship_p_threshold,
-            min_cluster_size=ship_min_cluster_size,
-            kernel_arm=ship_kernel_arm,
-            median_kernel_arm=ship_median_kernel_arm,
-            connectivity=ship_connectivity,
-        )
-        plume_mask = np.asarray(plume_mask, dtype=bool)
-        ship_mask = np.asarray(ship_mask, dtype=bool)
-        return plume_mask, ship_mask, [plume_mask.copy()], [ship_mask.copy()]
 
-    working_image = np.array(image, dtype=float, copy=True)
+    image = np.asarray(image, dtype=float)
+    extra = np.array([]) if bg_extra is None else np.asarray(bg_extra, dtype=float).ravel()
+
+    def _bg_stats(excluded):
+        pixels = np.concatenate([image[~excluded].ravel(), extra])
+        mean, std = np.nanmean(pixels), np.nanstd(pixels, ddof=0)
+        # guard: a background mean above the noise level means the plume is not masked well
+        # enough yet; use 0 to avoid skewing the Z-test
+        if np.isfinite(mean) and np.isfinite(std) and mean > std:
+            if verbose:
+                print(f"Iterative Z-test: bg_mean ({mean:.2e}) > bg_std ({std:.2e}), using bg_mean = 0")
+            mean = 0.0
+        return mean, std
+
+    no_mask = np.zeros(image.shape, dtype=bool)
+    if bg_mean is None or bg_std is None:
+        est_mean, est_std = _bg_stats(no_mask)
+        current_bg_mean = est_mean if bg_mean is None else bg_mean
+        current_bg_std = est_std if bg_std is None else bg_std
+    else:
+        current_bg_mean, current_bg_std = bg_mean, bg_std
+
     previous_mask = None
-    plume_mask = np.zeros_like(working_image, dtype=bool)
-    ship_mask = np.zeros_like(working_image, dtype=bool)
-    final_mask = np.zeros_like(working_image, dtype=bool)
+    plume_mask = ship_mask = no_mask
     plume_masks = []
     ship_masks = []
 
     for i in range(max(int(max_iter), 1)):
-        print("Iterative Z-test: iteration", i )
-        current_bg_mean = np.nanmean(working_image)
-        current_bg_std = np.nanstd(working_image, ddof=0)
-        # guard: if the background mean is unreasonably large relative to std,
-        # reset mean to 0 to avoid skewing the Z-test (user request).
-        if np.isfinite(current_bg_mean) and np.isfinite(current_bg_std):
-            if current_bg_mean > current_bg_std:
-                current_bg_mean = 0.0
-                print(f"Iterative Z-test: warning - bg_mean ({current_bg_mean:.2f}) > 2 * bg_std ({current_bg_std:.2f}), resetting bg_mean to 0 for Z-test")
-
-        plume_mask = _detect_plume_ztest_core(
+        plume_mask = np.asarray(_detect_plume_ztest_core(
             image,
             bg_mean=current_bg_mean,
             bg_std=current_bg_std,
@@ -453,8 +505,13 @@ def detect_plume_ztest_iterative(
             viewdir_max=viewdir_max,
             keep_second_largest=keep_second_largest,
             second_size_threshold=second_size_threshold,
-        )
-        ship_mask = detect_plume_ztest_left(
+            merge_max_gap_seconds=merge_max_gap_seconds,
+            merge_max_row_distance=merge_max_row_distance,
+            merge_min_cluster_size=merge_min_cluster_size,
+            merge_max_cluster_size=merge_max_cluster_size,
+            merge_max_extension_minutes=merge_max_extension_minutes,
+        ), dtype=bool)
+        ship_mask = np.asarray(detect_plume_ztest_left(
             image,
             bg_mean=current_bg_mean,
             bg_std=current_bg_std,
@@ -463,29 +520,74 @@ def detect_plume_ztest_iterative(
             kernel_arm=ship_kernel_arm,
             median_kernel_arm=ship_median_kernel_arm,
             connectivity=ship_connectivity,
-        )
-        plume_mask = np.asarray(plume_mask, dtype=bool)
-        ship_mask = np.asarray(ship_mask, dtype=bool)
+        ), dtype=bool)
         final_mask = plume_mask | ship_mask
         plume_masks.append(plume_mask.copy())
         ship_masks.append(ship_mask.copy())
 
-        if previous_mask is not None:
-            changed_pixels = np.count_nonzero(final_mask != previous_mask)
-            net_change = int(np.count_nonzero(final_mask) - np.count_nonzero(previous_mask))
-            print(f"Iterative Z-test: changed pixels = {changed_pixels}, net mask change = {net_change:+d}")
-            if changed_pixels <= stop_pixels:
-                print("Iterative Z-test: stopping iteration (convergence reached)")
-                break
+        if verbose:
+            print(f"Iterative Z-test: iteration {i}, bg_mean {float(current_bg_mean):.2e}, "
+                  f"bg_std {float(current_bg_std):.2e}, plume px {plume_mask.sum()}, ship px {ship_mask.sum()}")
 
-        if not final_mask.any():
-            print("Iterative Z-test: no ship/plume pixels detected, stopping iteration")
-            break
+        if previous_mask is not None and np.count_nonzero(final_mask != previous_mask) <= stop_pixels:
+            break  # converged (also when nothing is found twice in a row)
 
-        working_image = np.where(final_mask, np.nan, image).astype(float, copy=False)
         previous_mask = final_mask.copy()
+        current_bg_mean, current_bg_std = _bg_stats(final_mask)
 
     return plume_mask, ship_mask, plume_masks, ship_masks
+
+
+def plume_mask_of(ds, plume_mask_settings):
+    """Iterative z-test plume mask (and ship mask) of the enhancement image of ds: first pass with
+    the statistics of the upwind (and downwind) reference images, then the background is
+    re-estimated from the reference pixels plus the plume-window pixels outside plume and ship.
+    plume_mask_settings is the processing/plume_mask section of the preprocessor settings."""
+    enh_var = "no2_enhancement_interp" if "no2_enhancement_interp" in ds else "no2_enhancement_c_back"
+    ref_image = ds["no2_ref"] - ds["no2_ref"].mean(dim="window_ref")
+    if "no2_ref_down" in ds:
+        ref_image_down = ds["no2_ref_down"] - ds["no2_ref_down"].mean(dim="window_ref_down")
+        ref_image_down = ref_image_down.rename({"window_ref_down": "window_ref"})  # unify dimension name
+        ref_image = xr.concat([ref_image, ref_image_down], dim="window_ref", join="outer")
+    mask, ship_mask, _, _ = detect_plume_ztest_iterative(
+        ds[enh_var].values,
+        bg_mean=ref_image.mean().values,
+        bg_std=ref_image.std().values,
+        bg_extra=ref_image.values if plume_mask_settings["bg_include_references"] else None,
+        p_threshold=plume_mask_settings["p_threshold"],
+        min_cluster_size=plume_mask_settings["min_cluster_size"],
+        connectivity=plume_mask_settings["connectivity"],
+        kernel_arm=plume_mask_settings["kernel_arm"],
+        require_connection=plume_mask_settings["require_connection"],
+        ds_plume=ds,
+        keep_second_largest=False,
+        second_size_threshold=100,
+        ship_p_threshold=plume_mask_settings["ship_p_threshold"],
+        ship_min_cluster_size=plume_mask_settings["ship_min_cluster_size"],
+        max_iter=plume_mask_settings["max_iter"],
+        stop_pixels=plume_mask_settings["stop_pixels"],
+        merge_max_gap_seconds=plume_mask_settings["merge_max_gap_seconds"],
+        merge_max_row_distance=plume_mask_settings["merge_max_row_distance"],
+        merge_min_cluster_size=plume_mask_settings["merge_min_cluster_size"],
+        merge_max_cluster_size=plume_mask_settings["merge_max_cluster_size"],
+        merge_max_extension_minutes=plume_mask_settings["merge_max_extension_minutes"],
+    )
+    return np.asarray(mask, dtype=bool), np.asarray(ship_mask, dtype=bool)
+
+
+def reference_hits_plume(ds, mask):
+    """True if a reference window overlaps the time span of the masked plume."""
+    if not mask.any():
+        return False
+    plume_times = pd.to_datetime(ds["times_plume"].values)[mask.any(axis=0)]
+    t_min, t_max = plume_times.min(), plume_times.max()
+    for time_var in ("times_ref", "times_ref_down"):
+        if time_var in ds:
+            ref_times = pd.to_datetime(ds[time_var].values)
+            if ((ref_times >= t_min) & (ref_times <= t_max)).any():
+                return True
+    return False
+
 
 def detect_plume_ztest_left(
     image,
@@ -524,13 +626,7 @@ def detect_plume_ztest_left(
         footprint[c, c + a] = True
         footprint[c, c - a] = True
 
-    def local_mean(arr, footprint):
-        def _func(values):
-            vals = values[~np.isnan(values)]
-            return vals.mean() if vals.size else np.nan
-        return ndimage.generic_filter(arr, _func, footprint=footprint, mode="constant", cval=np.nan)
-
-    neigh_mean = local_mean(image, footprint)
+    neigh_mean = _local_nanmean(image, footprint)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         z = (neigh_mean - bg_mean) / bg_std
@@ -584,8 +680,17 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
 
     The plume is searched in image rows plume_rows[0]:plume_rows[1], the ship in
     ship_rows[0]:ship_rows[1], both within +-time_tolerance_seconds of the pass time.
+    Rows are the original IMPACT viewing direction numbers (image_row coordinate), so they
+    keep pointing at the same elevations when the lowest viewing directions are dropped.
     Sets ds_plume.attrs["plume_or_ship_found"] to "True"/"False".
     """
+    from SEICOR.plotting import set_elevation_yticks  # local: plotting imports enhancements, which imports this module
+
+    row_labels = np.asarray(ds_plume["image_row"].values)
+
+    def _row_positions(rows):
+        return np.nonzero((row_labels >= rows[0]) & (row_labels < rows[1]))[0]
+
     # prefer interpolated enhancement, fall back to c_back variant
     if 'no2_enhancement_interp' in ds_plume:
         varname = 'no2_enhancement_interp'
@@ -603,7 +708,7 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         except Exception:
             pass
 
-    slice_rows = slice(*plume_rows)
+    slice_rows = _row_positions(plume_rows)
     tol = pd.Timedelta(seconds=time_tolerance_seconds)
     times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
     t0 = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
@@ -618,8 +723,8 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
 
     # create full-size mask and put the detected mask into the correct location
     mask_full = np.zeros_like(image_full, dtype=bool)
-    # slice_rows is a slice object, idx is the 1D array of time/column indices
-    mask_full[slice_rows, idx] = mask
+    # slice_rows (row positions) and idx (time/column indices) are 1D index arrays
+    mask_full[np.ix_(slice_rows, idx)] = mask
 
     # plot image with plume boundary overlay using time on x-axis and VEA on y-axis
     import matplotlib.dates as mdates
@@ -638,7 +743,8 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
     yedges = np.arange(ny + 1)
 
-    mesh = ax.pcolormesh(xedges, yedges, image_full, cmap="viridis", shading="auto")
+    mesh = ax.pcolormesh(xedges, yedges, image_full, cmap="bwr", shading="auto",
+                         vmin=-np.nanmax(np.abs(image_full)), vmax=np.nanmax(np.abs(image_full)))
     fig.colorbar(mesh, ax=ax, label="NO$_2$ enhancement")
 
     # draw boundary around the mask region using mesh centres
@@ -647,13 +753,7 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
     Xc, Yc = np.meshgrid(xcent, ycent)
     ax.contour(Xc, Yc, mask_full.astype(int), levels=[0.5], colors="red", linewidths=1.5)
 
-    ax.set_title("NO$_2$ enhancement with plume mask boundary (placed at correct location)")
-    ax.set_xlabel("Time (UTC)")
-    vea_vals = ds_plume["vea"].values 
-    yticks = np.arange(0, len(vea_vals), 3)
-    ax.set_yticks(yticks)
-    ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
-    ax.set_ylabel("VEA / °")
+    set_elevation_yticks(ax, ds_plume["vea"].values, row_offset=0.5)
     ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("VEA / °")
     ax.xaxis_date()
@@ -664,12 +764,12 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
     ship_found = False
     if mask_full.sum() > 0:
         plume_found = True
-        savepath = out_dir / f"plume_detection" / f"plumes_{date}" / f"ship_yes" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_plume.png"
+        savepath = out_dir / "plume_or_ship_detection" / f"plume_or_ship_{date}" / "plume_or_ship_yes" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_plume.png"
         os.makedirs(os.path.dirname(savepath), exist_ok=True)
         plt.savefig(savepath)
     plt.close('all')
     if plume_found == False:
-        slice_rows = slice(*ship_rows)
+        slice_rows = _row_positions(ship_rows)
         tol = pd.Timedelta(seconds=time_tolerance_seconds)
         times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
         t0 = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
@@ -682,8 +782,8 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
 
         # create full-size mask and put the detected mask into the correct location
         mask_full = np.zeros_like(image_full, dtype=bool)
-        # slice_rows is a slice object, idx is the 1D array of time/column indices
-        mask_full[slice_rows, idx] = mask
+        # slice_rows (row positions) and idx (time/column indices) are 1D index arrays
+        mask_full[np.ix_(slice_rows, idx)] = mask
 
         # plot image with plume boundary overlay using time on x-axis and VEA on y-axis
         import matplotlib.dates as mdates
@@ -700,7 +800,8 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
             xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
         yedges = np.arange(ny + 1)
 
-        mesh = ax.pcolormesh(xedges, yedges, image_full, cmap="viridis", shading="auto")
+        mesh = ax.pcolormesh(xedges, yedges, image_full, cmap="bwr", shading="auto",
+                         vmin=-np.nanmax(np.abs(image_full)), vmax=np.nanmax(np.abs(image_full)))
         fig.colorbar(mesh, ax=ax, label="NO$_2$ enhancement")
 
         xcent = (xedges[:-1] + xedges[1:]) / 2.0
@@ -708,13 +809,7 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         Xc, Yc = np.meshgrid(xcent, ycent)
         ax.contour(Xc, Yc, mask_full.astype(int), levels=[0.5], colors="blue", linewidths=1.5)
 
-        ax.set_title("NO$_2$ enhancement with plume mask boundary (placed at correct location)")
-        ax.set_xlabel("Time (UTC)")
-        vea_vals = ds_plume["vea"].values 
-        yticks = np.arange(0, len(vea_vals), 3)
-        ax.set_yticks(yticks)
-        ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
-        ax.set_ylabel("VEA / °")
+        set_elevation_yticks(ax, ds_plume["vea"].values, row_offset=0.5)
         ax.set_xlabel("Time (UTC)")
         ax.set_ylabel("VEA / °")
         ax.xaxis_date()
@@ -722,12 +817,12 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
         fig.autofmt_xdate()
         if mask_full.sum() == 0:
-            savepath = out_dir / f"plume_detection" / f"plumes_{date}" / f"ship_no" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_out.png"
+            savepath = out_dir / "plume_or_ship_detection" / f"plume_or_ship_{date}" / "plume_or_ship_no" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_out.png"
             os.makedirs(os.path.dirname(savepath), exist_ok=True)
             plt.savefig(savepath)
         else:
             ship_found = True
-            savepath = out_dir / f"plume_detection" / f"plumes_{date}" / f"ship_yes" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_ship.png"
+            savepath = out_dir / "plume_or_ship_detection" / f"plume_or_ship_{date}" / "plume_or_ship_yes" / f"plume_{t0.strftime('%Y%m%d_%H%M%S')}_{ds_plume.attrs.get('mmsi')}_mask_ship.png"
             os.makedirs(os.path.dirname(savepath), exist_ok=True)
             plt.savefig(savepath)
     plt.close('all')
