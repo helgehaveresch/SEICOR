@@ -20,7 +20,7 @@ Instruments: #relative to base_paths
   meteomast_path: "weatherstations/Billwerder" # Uni Hamburg meteomast, wind at 50/110/175/280 m
   median_wind_file: "weatherstations/Median_winddata/median_winddata_hourly.csv" # hourly median wind of the weather stations (currently not used)
   ais_dir: "AIS"
-  img_dir: "video" # directory containing daily zipped video files
+  img_dir: "IMPACT/video" # directory containing daily zipped video files
   weather_stations_dir: "weatherstations"
   era5_dir: "ERA5" # monthly GRIB files from download_era_5.py
   era5_max_height_m: 500 # ERA5 model levels up to this height above ground are stored in the plume files
