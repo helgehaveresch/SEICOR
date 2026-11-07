@@ -18,6 +18,49 @@ import zipfile
 from io import BytesIO
 
 
+def enhancement_vars(ds_plume):
+    """Names of the NO2 enhancement image and its vertical integral to plot, plus a label.
+
+    Uses the upwind/downwind interpolated background if it was calculated, else the constant
+    (upwind) background. sort_plumes stores a copy of the constant enhancement as
+    'no2_enhancement_interp' when no downwind reference was found; that case is recognised by
+    the 'enhancement_var_used' attribute.
+    """
+    if ("no2_enhancement_interp" in ds_plume
+            and ds_plume.attrs.get("enhancement_var_used") != "no2_enhancement_c_back"):
+        return "no2_enhancement_interp", "vertically_integrated_no2_enhancement_interp", "interpolated background"
+    return "no2_enhancement_c_back", "vertically_integrated_no2_enhancement_c_back", "constant background"
+
+
+def vea_from_los(los):
+    """Elevation angles per image row from the line-of-sight angles (90° = horizon, 1D or Nx2)."""
+    los = np.asarray(los, dtype=float)
+    return (los[:, 0] if los.ndim == 2 else los) - 90.0
+
+
+def set_elevation_yticks(ax, vea, step=5, fontsize=None, row_offset=0.0):
+    """Label a row-indexed y-axis at round elevation angles (0°, 5°, 10°, ...).
+
+    vea holds the elevation angle per image row. Ticks are interpolated between the rows, as
+    the rows generally do not lie on round angles. row_offset is the y position of the centre
+    of row 0: 0 for pcolormesh on row centres, 0.5 for pcolormesh on edges np.arange(ny + 1).
+    """
+    vea = np.asarray(vea, dtype=float)
+    rows = np.arange(len(vea)) + row_offset
+    valid = np.isfinite(vea)
+    if not valid.any():
+        return
+    order = np.argsort(vea[valid])
+    vea, rows = vea[valid][order], rows[valid][order]
+    first = int(np.ceil(vea[0] / step))
+    last = int(np.floor(vea[-1] / step))
+    ticks = [k * step for k in range(first, last + 1)]
+    ax.set_yticks(np.interp(ticks, vea, rows))
+    ax.set_yticklabels([f"{t}°" for t in ticks])
+    if fontsize is not None:
+        ax.tick_params(axis="y", labelsize=fontsize)
+
+
 def plot_LOS(lon1, lon2, lat1, lat2, ax=None, label=None):
     """
     Plot lines from (lon1, lat1) to each unique (lon2, lat2) pair.
@@ -47,7 +90,7 @@ def plot_trajectories(filtered_ships, maskedout_ships, df_closest, lon1, lon2, l
     plot_LOS(lon1, lon2, lat1, lat2)
     plt.legend(loc="best", fontsize="small", ncol=2)
     if save:
-        savepath = os.path.join(out_dir, f"trajectories", f"filtered_ships_{date_str}.png")
+        savepath = os.path.join(out_dir, "trajectories", date_str, f"filtered_ships_{date_str}.png")
         os.makedirs(os.path.dirname(savepath), exist_ok=True)
         plt.savefig(savepath)
         plt.close()
@@ -66,7 +109,7 @@ def plot_trajectories(filtered_ships, maskedout_ships, df_closest, lon1, lon2, l
     plot_LOS(lon1, lon2, lat1, lat2)
     plt.legend(loc="best", fontsize="small", ncol=2)
     if save:
-        savepath = os.path.join(out_dir, f"trajectories", f"maskedout_ships_{date_str}.png")
+        savepath = os.path.join(out_dir, "trajectories", date_str, f"maskedout_ships_{date_str}.png")
         os.makedirs(os.path.dirname(savepath), exist_ok=True)
         plt.savefig(savepath)
         plt.close()
@@ -86,7 +129,7 @@ def plot_trajectories(filtered_ships, maskedout_ships, df_closest, lon1, lon2, l
     plt.ylim(window_small[0], window_small[1])
     plt.legend(loc="best", fontsize="small", ncol=2)
     if save:
-        savepath = os.path.join(out_dir, f"trajectories", f"filtered_ships_small_{date_str}.png")
+        savepath = os.path.join(out_dir, "trajectories", date_str, f"filtered_ships_small_{date_str}.png")
         os.makedirs(os.path.dirname(savepath), exist_ok=True)
         plt.savefig(savepath)
         plt.close()
@@ -106,7 +149,7 @@ def plot_trajectories(filtered_ships, maskedout_ships, df_closest, lon1, lon2, l
     plt.ylim(window_small[0], window_small[1])
     #plt.legend(loc="best", fontsize="small", ncol=2)
     if save:
-        savepath = os.path.join(out_dir, f"trajectories", f"maskedout_ships_small_{date_str}.png")
+        savepath = os.path.join(out_dir, "trajectories", date_str, f"maskedout_ships_small_{date_str}.png")
         os.makedirs(os.path.dirname(savepath), exist_ok=True)
         plt.savefig(savepath)
         plt.close()
@@ -130,7 +173,7 @@ def plot_trajectories(filtered_ships, maskedout_ships, df_closest, lon1, lon2, l
     plt.ylim(window_small[0], window_small[1])
     plt.legend(loc="best", fontsize="small", ncol=2)
     if save:
-        savepath = os.path.join(out_dir, f"trajectories", f"multipass_ships_small_{date_str}.png")
+        savepath = os.path.join(out_dir, "trajectories", date_str, f"multipass_ships_small_{date_str}.png")
         os.makedirs(os.path.dirname(savepath), exist_ok=True)
         plt.savefig(savepath)
         plt.close()
@@ -173,7 +216,7 @@ def plot_maskedout_ships_details(maskedout_ships, window_small, lon1, lon2, lat1
     plt.ylim(window_small[0], window_small[1])
     plt.legend(loc="best", fontsize="small", ncol=2)
     if save:
-        savepath = os.path.join(out_dir, f"trajectories", f"maskedout_ships_details_{date_str}.png")
+        savepath = os.path.join(out_dir, "trajectories", date_str, f"maskedout_ships_details_{date_str}.png")
         os.makedirs(os.path.dirname(savepath), exist_ok=True)
         plt.savefig(savepath)
         plt.close()
@@ -382,7 +425,6 @@ def plot_single_ship(
     vmax=None,
     include_mmsi=False,
     include_timestamp=False,
-    y_axis_ticks_interval=7,
     x_axis_tick_interval=2,
     mode="dSCD",
     save_fig=False,
@@ -409,8 +451,6 @@ def plot_single_ship(
         Whether to include MMSI in the plot title.
     include_timestamp : bool
         Whether to include timestamp in the plot title.
-    y_axis_ticks_interval : int
-        Interval for y-axis ticks.
     x_axis_tick_interval : int
         Interval for x-axis ticks.
     mode : str
@@ -420,15 +460,15 @@ def plot_single_ship(
     if ds_impact is not None:
         no2_full = ds_impact["a[NO2]"].values  # shape: (time, viewing_direction)
         times_full = pd.to_datetime(ds_impact["datetime"].isel(viewing_direction=0).values)
-        viewing_dirs = ds_impact["los"].values
+        vea = vea_from_los(ds_impact["los"].values)
     if ds_enhancements is not None:
         no2_full = ds_enhancements["no2_enhancement"].values
         times_full = pd.to_datetime(ds_enhancements["datetime"].isel(viewing_direction=0).values)
-        viewing_dirs = ds_enhancements["los"].values
+        vea = vea_from_los(ds_enhancements["los"].values)
     if dir_enhancements is not None:
-        no2_full = dir_enhancements["no2_enhancement_c_back"].values
+        no2_full = dir_enhancements[enhancement_vars(dir_enhancements)[0]].values
         times_full = dir_enhancements["times_plume"].values
-        viewing_dirs = dir_enhancements["image_row"].values
+        vea = dir_enhancements["vea"].values
         mmsi = dir_enhancements.mmsi
         timestamp = pd.to_datetime(dir_enhancements.t)
     if t_after_start_h is not None:
@@ -453,7 +493,7 @@ def plot_single_ship(
         pcm = ax.pcolormesh(
             X, Y, no2_sel,
             shading='auto',
-            cmap='seismic', vmin=-_m, vmax=_m
+            cmap='bwr', vmin=-_m, vmax=_m
         )
         cbar = plt.colorbar(pcm)
         cbar.set_label(r"NO$_2$ dSCD / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=22)
@@ -462,16 +502,7 @@ def plot_single_ship(
         ax.set_xlabel("Time (UTC)", fontsize=22)
         ax.set_ylabel("Viewing direction", fontsize=22)
         ax.set_title("NO$_2$ dSCD Single Ship", fontsize=24)
-        N = y_axis_ticks_interval
-        yticks = np.arange(0, len(viewing_dirs), N)
-        ax.set_yticks(yticks)
-        # viewing_dirs can be 2D (e.g., Nx2) or 1D (N,). Handle both cases.
-        vd = np.asarray(viewing_dirs)
-        if vd.ndim == 2:
-            labels = [f"{vd[i,0]-90:.1f}°" for i in yticks]
-        else:
-            labels = [f"{vd[i]-90:.1f}°" for i in yticks]
-        ax.set_yticklabels(labels, fontsize=18)
+        set_elevation_yticks(ax, vea, fontsize=18)
         ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=x_axis_tick_interval))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
         ax.tick_params(axis='x', labelsize=18)
@@ -488,7 +519,7 @@ def plot_single_ship(
         pcm = ax.pcolormesh(
             X, Y, no2_full,
             shading='auto',
-            cmap='seismic', vmin=-_m, vmax=_m
+            cmap='bwr', vmin=-_m, vmax=_m
         )
         cbar = plt.colorbar(pcm)
         cbar.set_label(r"NO$_2$ Enh. / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=22)
@@ -501,17 +532,8 @@ def plot_single_ship(
             title += f", MMSI: {mmsi}"
         if include_timestamp:
             title += f", Time: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
-        ax.set_title(title, fontsize=14)
-        N = y_axis_ticks_interval
-        yticks = np.arange(0, len(viewing_dirs), N)
-        ax.set_yticks(yticks)
-        # viewing_dirs can be 2D (e.g., Nx2) or 1D (N,). Handle both cases.
-        vd = np.asarray(viewing_dirs)
-        if vd.ndim == 2:
-            labels = [f"{vd[i,0]-90:.1f}°" for i in yticks]
-        else:
-            labels = [f"{vd[i]:.1f}°" for i in yticks]
-        ax.set_yticklabels(labels, fontsize=18)
+        ax.set_title(title, fontsize=12)
+        set_elevation_yticks(ax, vea, fontsize=18)
         ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=x_axis_tick_interval))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
         ax.tick_params(axis='x', labelsize=18)
@@ -545,13 +567,13 @@ def plot_single_ship(
 
         # --- 2D NO2 enhancement plot ---
         ax = axs[0]
-        # symmetric seismic colormap: choose vmax from data magnitude
+        # symmetric bwr colormap: choose vmax from data magnitude
         _data = np.array(no2_full)
         _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
         pcm = ax.pcolormesh(
             X, Y, no2_full,
             shading='auto',
-            cmap='seismic', vmin=-_m, vmax=_m
+            cmap='bwr', vmin=-_m, vmax=_m
         )
         cbar = plt.colorbar(pcm, ax=ax)
         cbar.set_label(r"NO$_2$ Enh. / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=20)
@@ -559,19 +581,9 @@ def plot_single_ship(
         cbar.ax.yaxis.get_offset_text().set_fontsize(18)
 
         ax.set_ylabel("VEA / °", fontsize=22)
-        ax.set_title("NO$_2$ dSCD Enhancements", fontsize=24)
+        ax.set_title("NO$_2$ dSCD Enhancements", fontsize=20)
 
-        # Set y-ticks to actual viewing direction angles (every Nth for clarity)
-        N = y_axis_ticks_interval
-        yticks = np.arange(0, len(viewing_dirs), N)
-        ax.set_yticks(yticks)
-        # viewing_dirs can be 2D (e.g., Nx2) or 1D (N,). Handle both cases.
-        vd = np.asarray(viewing_dirs)
-        if vd.ndim == 2:
-            labels = [f"{vd[i,0]-90:.1f}°" for i in yticks]
-        else:
-            labels = [f"{vd[i]-90:.1f}°" for i in yticks]
-        ax.set_yticklabels(labels, fontsize=18)
+        set_elevation_yticks(ax, vea, fontsize=18)
 
         # Format x-axis: only every 2 min a tick
         ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=x_axis_tick_interval))
@@ -749,20 +761,17 @@ def plot_ship_pass_subplot_v1(
 
     # NO2 enhancement 2D plot
     ax0 = fig.add_subplot(gs[0, 0])
-    X, Y = np.meshgrid(ds_plume["times_window"], np.arange(ds_plume["no2_enhancement_c_back"].shape[0]))
-    _data = np.array(ds_plume["no2_enhancement_c_back"].values)
+    enh_var, enh_int_var, enh_label = enhancement_vars(ds_plume)
+    X, Y = np.meshgrid(ds_plume["times_window"], np.arange(ds_plume[enh_var].shape[0]))
+    _data = np.array(ds_plume[enh_var].values)
     _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
-    pcm = ax0.pcolormesh(X, Y, ds_plume["no2_enhancement_c_back"], shading='auto', cmap='seismic', vmin=-_m, vmax=_m)
+    pcm = ax0.pcolormesh(X, Y, ds_plume[enh_var], shading='auto', cmap='bwr', vmin=-_m, vmax=_m)
     fig.colorbar(pcm, ax=ax0, label=r"NO$_2$ Enhancement / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
     tstr_fname = pd.to_datetime(ds_plume.t).strftime('%Y%m%d_%H%M%S')
-    ax0.set_title(f"MMSI {ds_plume.mmsi} NO2 around {tstr_display}")
+    ax0.set_title(f"MMSI {ds_plume.mmsi} NO2 around {tstr_display}\n({enh_label})")
     ax0.set_xlabel("Time")
-    N = 3  # Show every 3rd LOS value
-    vea_vals = ds_plume["vea"].values 
-    yticks = np.arange(0, len(vea_vals), N)
-    ax0.set_yticks(yticks)
-    ax0.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
+    set_elevation_yticks(ax0, ds_plume["vea"].values)
     ax0.set_ylabel("VEA / °")
     ax0.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
     ax0.xaxis.set_major_locator(mdates.MinuteLocator(interval=1))
@@ -770,7 +779,8 @@ def plot_ship_pass_subplot_v1(
 
     # Integrated NO2
     ax1 = fig.add_subplot(gs[0, 1])
-    ax1.plot(ds_plume["times_window"], ds_plume["vertically_integrated_no2_enhancement"], color='tab:blue')
+    int_var = enh_int_var if enh_int_var in ds_plume else "vertically_integrated_no2_enhancement"  # old plume files
+    ax1.plot(ds_plume["times_window"], ds_plume[int_var], color='tab:blue')
     ax1.set_title("Vertically integrated NO$_2$ enhancement")
     ax1.set_xlabel("Time")
     ax1.set_ylabel(r"Integrated NO$_2$ dSCD / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
@@ -935,20 +945,17 @@ def plot_ship_pass_subplot_v2(
 
     # NO2 enhancement 2D plot
     ax0 = fig.add_subplot(gs[0, 0])
-    X, Y = np.meshgrid(times_num, np.arange(ds_plume["no2_enhancement_c_back"].shape[0]))
-    _data = np.array(ds_plume["no2_enhancement_c_back"].values)
+    enh_var, enh_int_var, enh_label = enhancement_vars(ds_plume)
+    X, Y = np.meshgrid(times_num, np.arange(ds_plume[enh_var].shape[0]))
+    _data = np.array(ds_plume[enh_var].values)
     _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
-    pcm = ax0.pcolormesh(X, Y, ds_plume["no2_enhancement_c_back"], shading='auto', cmap='seismic', vmin=-_m, vmax=_m)
+    pcm = ax0.pcolormesh(X, Y, ds_plume[enh_var], shading='auto', cmap='bwr', vmin=-_m, vmax=_m)
     fig.colorbar(pcm, ax=ax0, label=r"NO$_2$ Enhancement / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
     tstr_fname = pd.to_datetime(ds_plume.t).strftime('%Y%m%d_%H%M%S')
-    ax0.set_title(f"MMSI {ds_plume.mmsi} NO2 around {tstr_display}")
+    ax0.set_title(f"MMSI {ds_plume.mmsi} NO2 around {tstr_display}\n({enh_label})")
     ax0.set_xlabel("Time")
-    N = 3  # Show every 3rd VEA value
-    vea_vals = ds_plume["vea"].values
-    yticks = np.arange(0, len(vea_vals), N)
-    ax0.set_yticks(yticks)
-    ax0.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
+    set_elevation_yticks(ax0, ds_plume["vea"].values)
     ax0.set_ylabel("VEA / °")
     ax0.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
     ax0.xaxis.set_major_locator(mdates.MinuteLocator(interval=1))
@@ -956,7 +963,7 @@ def plot_ship_pass_subplot_v2(
 
     # Integrated NO2
     ax1 = fig.add_subplot(gs[0, 1])
-    ax1.plot(times_num, ds_plume["vertically_integrated_no2_enhancement_c_back"], color='tab:blue')
+    ax1.plot(times_num, ds_plume[enh_int_var], color='tab:blue')
     ax1.set_title("Vertically integrated NO$_2$ enhancement")
     ax1.set_xlabel("Time")
     ax1.set_ylabel(r"Integrated NO$_2$ dSCD / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
@@ -1145,7 +1152,7 @@ def plot_ship_pass_subplot_v2(
 
         # IMPACT: n_NO2 = no2_data / (L * n_air) * 1e9
         # Apply rolling mean over 20 dim_0 (time) for IMPACT
-        impact_enh_rolling = ds_plume["no2_enhancement_c_back"].isel(image_row=slice(5,9)).mean(dim="image_row").rolling(window_plume=20, center=True).mean()
+        impact_enh_rolling = ds_plume[enh_var].sel(image_row=slice(5, 8)).mean(dim="image_row").rolling(window_plume=20, center=True).mean()
         n_NO2_impact = impact_enh_rolling * 1e4 / (L * n_air_aligned) * 1e9
 
     # Convert LP-DOAS times to matplotlib date numbers for consistent plotting
@@ -1437,7 +1444,7 @@ def plot_all_instruments_timeseries_VMR(
     ax2 = ax1.twinx()
     ax2.plot(
         coarsened_ds["datetime"].isel(viewing_direction=0),
-        VMR_NO2.isel(viewing_direction=slice(4,8)).mean(dim="viewing_direction"),
+        VMR_NO2.sel(viewing_direction=slice(4, 7)).mean(dim="viewing_direction"),
         label="IMPACT", color='C1', zorder=1
     )
     ax2.set_ylabel("IMPACT VMR / ppb", fontsize=14, color='C1')
@@ -1514,7 +1521,7 @@ def plot_all_instruments_timeseries_SC(
     # Plot In Situ NO2
     ax1.plot(
         coarsened_ds["datetime"].isel(viewing_direction=0),
-        coarsened_ds["a[NO2]"].isel(viewing_direction=slice(5,9)).mean(dim="viewing_direction"),
+        coarsened_ds["a[NO2]"].sel(viewing_direction=slice(5, 8)).mean(dim="viewing_direction"),
         label="IMPACT"
     )
 
@@ -1649,7 +1656,8 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
     """
 
 
-    data = ds_plume["no2_enhancement_interp"].values
+    enh_var, _, enh_label = enhancement_vars(ds_plume)
+    data = ds_plume[enh_var].values
     ny, nx = data.shape
 
     # find time coordinate
@@ -1671,7 +1679,7 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
 
     _data = np.array(data)
     _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
-    mesh = ax.pcolormesh(xedges, yedges, data, cmap="seismic", shading="auto", vmin=-_m, vmax=_m)
+    mesh = ax.pcolormesh(xedges, yedges, data, cmap="bwr", shading="auto", vmin=-_m, vmax=_m)
     # contour needs x coords for proper alignment; use mesh coordinates
     Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
     ax.contour(Xc, Yc, mask.astype(int), levels=[0.5], colors="red", linewidths=1.5)
@@ -1680,15 +1688,12 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     # show time as hours:minutes:seconds on the x-axis
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-    vea_vals = ds_plume["vea"].values 
-    yticks = np.arange(0, len(vea_vals), 3)
-    ax.set_yticks(yticks)
-    ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
+    set_elevation_yticks(ax, ds_plume["vea"].values, row_offset=0.5)
     ax.set_ylabel("VEA / °")
     ax.set_xlabel("Time (UTC)")
     fig.autofmt_xdate()
     mmsi = ds_plume.attrs.get('mmsi', 'unknown_mmsi')
-    ax.set_title(f"NO$_2$ date: {date}, mmsi: {mmsi}")
+    ax.set_title(f"NO$_2$ date: {date}, mmsi: {mmsi} ({enh_label})")
     cbar = fig.colorbar(mesh, ax=ax)
     cbar.set_label("NO$_2$ enhancement")
     out_folder = out_dir / f"plume_mask" / f"plumes_{date}"
@@ -1708,7 +1713,8 @@ def plot_no2_enhancement_with_plume_and_ship_mask(ds_plume, plume_mask, ship_mas
 
     Plume pixels are drawn in red and ship pixels are drawn in blue.
     """
-    data = ds_plume["no2_enhancement_interp"].values
+    enh_var, _, enh_label = enhancement_vars(ds_plume)
+    data = ds_plume[enh_var].values
     ny, nx = data.shape
 
     times = pd.to_datetime(ds_plume["times_plume"].values)
@@ -1726,7 +1732,7 @@ def plot_no2_enhancement_with_plume_and_ship_mask(ds_plume, plume_mask, ship_mas
 
     _data = np.array(data)
     _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
-    mesh = ax.pcolormesh(xedges, yedges, data, cmap="seismic", shading="auto", vmin=-_m, vmax=_m)
+    mesh = ax.pcolormesh(xedges, yedges, data, cmap="bwr", shading="auto", vmin=-_m, vmax=_m)
 
     xcent = (xedges[:-1] + xedges[1:]) / 2.0
     ycent = (yedges[:-1] + yedges[1:]) / 2.0
@@ -1738,10 +1744,7 @@ def plot_no2_enhancement_with_plume_and_ship_mask(ds_plume, plume_mask, ship_mas
     ax.xaxis_date()
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-    vea_vals = ds_plume["vea"].values
-    yticks = np.arange(0, len(vea_vals), 3)
-    ax.set_yticks(yticks)
-    ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
+    set_elevation_yticks(ax, ds_plume["vea"].values, row_offset=0.5)
     ax.set_ylabel("VEA / °")
     ax.set_xlabel("Time (UTC)")
     fig.autofmt_xdate()
@@ -1757,70 +1760,82 @@ def plot_no2_enhancement_with_plume_and_ship_mask(ds_plume, plume_mask, ship_mas
         tstr = "unknown_time"
     out_folder = out_dir / f"plumes_{tstr}"
     out_folder.mkdir(parents=True, exist_ok=True)
-    ax.set_title(f"NO$_2$ {tstr}, attr: {attr_str}")
+    ax.set_title(f"NO$_2$ {tstr}, attr: {attr_str} ({enh_label})")
     fname = out_folder / f"no2_enhancement_with_plume_and_ship_mask_{tstr}_{mmsi}_{attr_str}.png"
     fig.savefig(fname, bbox_inches='tight')
     plt.close(fig)
 
 
-def plot_reference_image_with_plume_mask(ref_image, mask, ds_plume, out_dir, date):    
+def plot_reference_image_with_plume_mask(ds_plume, out_dir, date, p_threshold=0.15, min_cluster_size=30):
+    """Reference quality plot of the upwind and (if found) downwind reference windows.
 
+    One row per reference: total NO2 dSCDs (left) and the variability, i.e. the dSCDs minus
+    the mean of that reference window, with the z-test plume mask of the variability (right).
+    Both rows share the colour scale of each column. Saved to plumes_<date>_upwind, or its
+    yes_plume subfolder if a plume-like structure is found in any reference.
+    """
+    from SEICOR.plumes import detect_plume_ztest
 
-    data = ref_image.values
-    ny, nx = data.shape
+    refs = [("Upwind", "no2_ref", "times_ref", "window_ref")]
+    if "no2_ref_down" in ds_plume:
+        refs.append(("Downwind", "no2_ref_down", "times_ref_down", "window_ref_down"))
 
-    # try to obtain time coordinate named 'time_ref' (fall back to other names)
-    
-    times = pd.to_datetime(ds_plume["times_ref"].values)
+    panels = []
+    for name, var, time_var, dim in refs:
+        total = ds_plume[var]
+        variability = total - total.mean(dim=dim)
+        mask = detect_plume_ztest(variability.values, p_threshold=p_threshold,
+                                  min_cluster_size=min_cluster_size, ds_plume=ds_plume)
+        panels.append((name, pd.to_datetime(ds_plume[time_var].values), total.values, variability.values, mask))
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # common colour scales per column
+    all_total = np.concatenate([p[2].ravel() for p in panels])
+    t_min, t_max = np.nanpercentile(all_total, [1, 99]) if np.isfinite(all_total).any() else (0.0, 1.0)
+    all_var = np.concatenate([p[3].ravel() for p in panels])
+    v_max = np.nanmax(np.abs(all_var)) if np.isfinite(all_var).any() else 1.0
 
-    # build xedges depending on whether times are available
-    xnum = mdates.date2num(times.to_pydatetime())
-    dx = np.diff(xnum)
-    if len(dx) > 0:
-        left = xnum[0] - dx[0] / 2.0
-        right = xnum[-1] + dx[-1] / 2.0
-        xedges = np.concatenate(([left], xnum[:-1] + dx / 2.0, [right]))
-    else:
-        xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+    vea_vals = ds_plume["vea"].values if "vea" in ds_plume else None
+    fig, axes = plt.subplots(len(panels), 2, figsize=(16, 5 * len(panels)), squeeze=False, constrained_layout=True)
 
+    for ax_row, (name, times, total, variability, mask) in zip(axes, panels):
+        ny = total.shape[0]
+        xnum = mdates.date2num(times.to_pydatetime())
+        dx = np.diff(xnum)
+        if len(dx) > 0:
+            xedges = np.concatenate(([xnum[0] - dx[0] / 2.0], xnum[:-1] + dx / 2.0, [xnum[-1] + dx[-1] / 2.0]))
+        else:
+            xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+        yedges = np.arange(ny + 1)
+        span = f"{times[0]:%H:%M:%S}–{times[-1]:%H:%M:%S}" if len(times) else ""
 
-    # y edges correspond to VEA dimension
-    yedges = np.arange(ny + 1)
+        mesh_total = ax_row[0].pcolormesh(xedges, yedges, total, cmap="viridis", shading="auto", vmin=t_min, vmax=t_max)
+        ax_row[0].set_title(f"{name} reference {span}: total NO$_2$ dSCD")
+        mesh_var = ax_row[1].pcolormesh(xedges, yedges, variability, cmap="bwr", shading="auto", vmin=-v_max, vmax=v_max)
+        Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
+        if mask.any():
+            ax_row[1].contour(Xc, Yc, mask.astype(int), levels=[0.5], colors="red", linewidths=1.5)
+        ax_row[1].set_title(f"{name} reference: variability (std {np.nanstd(variability):.2e})")
 
-    _data = np.array(data)
-    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
-    mesh = ax.pcolormesh(xedges, yedges, data, cmap="seismic", shading="auto", vmin=-_m, vmax=_m)
+        for ax in ax_row:
+            if vea_vals is not None:
+                set_elevation_yticks(ax, vea_vals, row_offset=0.5)
+            else:
+                ax.set_yticks(np.arange(0, ny, max(1, ny // 8)))
+            ax.xaxis_date()
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            ax.set_xlabel("Time (UTC)")
+            ax.set_ylabel("VEA / °")
 
-    # contour overlay (align to cell centers)
-    Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
-    ax.contour(Xc, Yc, mask.astype(int), levels=[0.5], colors="red", linewidths=1.5)
-
-    # y ticks from 'vea' coordinate if available
-    if "vea" in ds_plume:
-        vea_vals = ds_plume["vea"].values
-        step = max(1, len(vea_vals) // 8)
-        yticks = np.arange(0, len(vea_vals), step)
-        ax.set_yticks(yticks)
-        ax.set_yticklabels([f"{float(vea_vals[i]):.1f}°" for i in yticks])
-    else:
-        ax.set_yticks(np.arange(0, ny, max(1, ny // 8)))
-
-    ax.xaxis_date()
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-    ax.set_xlabel("Time (UTC)")
-    ax.set_ylabel("VEA / °")
-    ax.set_title("Reference NO$_2$ variability, date: {}".format(date))
-
-    cbar = fig.colorbar(mesh, ax=ax)
-    cbar.set_label("NO$_2$ Enh.")
+    fig.colorbar(mesh_total, ax=axes[:, 0].tolist(), label=r"NO$_2$ dSCD / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
+    fig.colorbar(mesh_var, ax=axes[:, 1].tolist(), label=r"NO$_2$ dSCD $-$ reference mean / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
+    mmsi = ds_plume.attrs.get('mmsi', 'unknown_mmsi')
+    fig.suptitle(f"Reference quality, date: {date}, MMSI {mmsi}")
 
     # build output folder and filename similar to other plotting function
-    out_base = out_dir / f"reference_quality" / f"plumes_{date}_upwind"
-    sub = "yes_plume" if mask.sum() > 0 else "no_plume"
-    out_folder = out_base / sub
+    out_folder = out_dir / f"reference_quality" / f"plumes_{date}_upwind"
+    if any(p[4].sum() > 0 for p in panels):
+        out_folder = out_folder / "yes_plume"
     out_folder.mkdir(parents=True, exist_ok=True)
 
     try:
