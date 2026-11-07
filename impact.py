@@ -100,10 +100,10 @@ def calculate_path_averaged_vmr_no2(df_insitu, ds):
     return ds
 
 def mask_rms_and_reduce_impact(ds_impact, rms_threshold=0.01):
-    rms_mean = ds_impact["rms"].isel(viewing_direction=slice(5, 9)).mean(dim="viewing_direction")
+    rms_mean = ds_impact["rms"].sel(viewing_direction=slice(5, 8)).mean(dim="viewing_direction")
     mask = rms_mean < rms_threshold
     time_variable = ds_impact["datetime"].isel(viewing_direction = 0) 
-    ds_impact_reduced = ds_impact.isel(viewing_direction=slice(5, 9)).mean(dim="viewing_direction")
+    ds_impact_reduced = ds_impact.sel(viewing_direction=slice(5, 8)).mean(dim="viewing_direction")
     ds_impact_reduced["datetime"] = time_variable
     ds_impact_masked = ds_impact_reduced.where(mask, drop=True)
     return mask, ds_impact_masked
@@ -127,6 +127,8 @@ def add_offaxis_ref_fit_to_plume_ds(ds_plume, IMPACT_path, SC_file_name):
     date = pd.to_datetime(ds_plume["times_plume"].values)[0].strftime("%y%m%d")
     ds_off = read_SC_file_imaging(IMPACT_path, date, mode= SC_file_name)
     ds_off = mask_zenith(ds_off)
+    # same viewing directions as the plume (the lowest ones may have been dropped)
+    ds_off = ds_off.sel(viewing_direction=ds_plume["image_row"].values)
 
     # small tolerance for edge matching
     t_tol = pd.Timedelta(milliseconds=1)
