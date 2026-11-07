@@ -1,12 +1,17 @@
 date: "250412"
 
 base_paths:
+  windows: "D:\\SEICOR"
+  linux: "/misc/dodecagon/BREDOM/SEICOR"
+
+bredom_paths: # the corrected LIDAR file (lidar_file) is read from here
   windows: "Q:\\BREDOM\\SEICOR"
   linux: "/misc/dodecagon/BREDOM/SEICOR"
 
 Instruments: #relative to base_paths
-  IMPACT_SC_path: "IMPACT/SLANT_25" #month folder is added automatically using the date
+  IMPACT_SC_path: "SLANT_25" #month folder is added automatically using the date
   IMPACT_SC_file_ending: "ID.NO2_VIS_daily_ref"
+  drop_lowest_viewing_directions: 5 # number of lowest viewing directions (VEA -3.0 to 0.2 deg) removed right after reading; row numbers in the settings below stay the original ones
   do_reference_correction: false
   SC_reference_offset_correction_files: "_D.NO2_VIS_fix_ref_250907"
   lp_doas_dir: "Open_Path/SpectralAnalysis/results"
@@ -15,8 +20,14 @@ Instruments: #relative to base_paths
   meteomast_path: "weatherstations/Billwerder" # Uni Hamburg meteomast, wind at 50/110/175/280 m
   median_wind_file: "weatherstations/Median_winddata/median_winddata_hourly.csv" # hourly median wind of the weather stations (currently not used)
   ais_dir: "AIS"
-  img_dir: "IMPACT/video" # directory containing daily zipped video files
+  img_dir: "video" # directory containing daily zipped video files
   weather_stations_dir: "weatherstations"
+  era5_dir: "ERA5" # monthly GRIB files from download_era_5.py
+  era5_max_height_m: 500 # ERA5 model levels up to this height above ground are stored in the plume files
+  lidar_file: "wind_LIDAR/lidar_flip_corrected.csv" # relative to bredom_paths; written by wind_model_meteomast_lidar_comparison.py; 2026 LIDAR only, the 2025 data is not used
+  ship_corridor_location: # ERA5 profile is interpolated to this point
+    - 53.56634576422346
+    - 9.690192228678288
   instrument_location:
     - 53.56958522848946
     - 9.69174249821205
@@ -55,15 +66,17 @@ processing:
   plume_window: # time window around the ship pass that is stored and analysed
     before_minutes: 1
     after_minutes: 3
+    extend_step_minutes: 2 # if the plume mask touches the left/right edge, extend the window on that side by this and mask again
+    max_extensions: 20 # maximum number of extension steps
 
   reference_search: # clean up- and downwind reference windows (enhancements.find_reference_window)
-    start_offset_minutes: 2 # upwind: first try starts this long before the pass; downwind: this long after the end of the plume window
-    search_minutes: 60 # search up to this far from the pass, in 1 min steps
+    start_offset_minutes: 1 # gap between plume window and reference: upwind ends this long before the start, downwind starts this long after the end of the plume window
+    search_minutes: 60 # search up to this far from the pass, in 30 s steps
     window_minutes: 1 # length of the reference window
     min_count: 100 # minimum number of measurements in the reference window
     min_span_seconds: 40 # minimum time covered by these measurements
-    other_ship_minutes: 5 # no other ship pass within this time of the reference window
-    ztest_p_threshold: 0.15 # z-test that must find no plume in the reference window
+    other_ship_minutes: 4 # no other ship pass within this time of the reference window
+    ztest_p_threshold: 0.18 # z-test that must find no plume in the reference window
     ztest_min_cluster_size: 20
 
   detection: # plume / ship flag (plumes.sort_plumes)
@@ -73,18 +86,28 @@ processing:
     plume_rows: [8, 20] # image rows (VEA) searched for the plume, python slice [start, stop)
     ship_rows: [4, 10] # image rows searched for the ship itself
 
-  plume_mask: # plume_mask stored in the plume files (only for passes with a plume or ship found)
-    p_threshold: 0.20
+  plume_mask: # plume_mask stored in the plume files (only for passes with a plume or ship found), iterative z-test (plumes.detect_plume_ztest_iterative)
+    p_threshold: 0.19
     min_cluster_size: 5
     kernel_arm: 1
     connectivity: 1
+    merge_max_gap_seconds: 15 # clusters at most this far apart in time on similar rows become one cluster; null switches this off
+    merge_max_row_distance: 2 # rows at most this far apart count as similar elevation angles
+    merge_min_cluster_size: 60 # only clusters with at least this many pixels are merged
+    merge_max_cluster_size: 200 # only clusters with at most this many pixels are merged, whether source-connected or neighbouring; null means no limit
+    merge_max_extension_minutes: 5 # merged clusters reach at most this far before or after the source-connected cluster; null means no limit
     require_connection: true
+    ship_p_threshold: 0.02 # left-sided test for the ship (negative dSCDs), as p_threshold_ship in detection
+    ship_min_cluster_size: 20 # as in the ship detection of sort_plumes
+    max_iter: 10 # first iteration uses the reference statistics, the following ones the re-estimated background
+    stop_pixels: 15 # stop when the plume|ship mask changes by at most this many pixels
+    bg_include_references: true # re-estimated background = reference pixels + plume-window pixels outside plume and ship
 
 Output:
-  plots_out_dir: "analysis"
-  img_out_dir: "video_5"
-  ship_passes_out_dir: "ship_passes"
-  plume_out_dir: "plumes"
+  plots_out_dir: "analysis_test"
+  img_out_dir: "video_test"
+  ship_passes_out_dir: "ship_passes_test"
+  plume_out_dir: "plumes_test"
 
 Plotting:
   generate_plots: true
