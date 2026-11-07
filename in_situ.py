@@ -234,7 +234,15 @@ def calc_mean_wind(df, t, window_seconds=60, speed_col='wind_speed', dir_col='wi
     wind_dir_mean = wind_dir_mean % 360
     return wind_speed_mean, wind_dir_mean
 
-def add_wind_to_ship_passes(df_closest, ds):
+def add_wind_to_ship_passes(df_closest, ds, mast_height=110):
+    """
+    Adds the mean wind (60 s window) at each ship pass time.
+
+    'wind_speed'/'wind_dir' (also used for the relative wind) are the meteomast wind at
+    `mast_height` m; where the mast has no data, the Airpointer wind is used instead.
+    'wind_source' records which one was used. The Airpointer wind is always kept as
+    'wind_speed_airpointer'/'wind_dir_airpointer'. mast_height=None uses the Airpointer only.
+    """
     if ds is None or ds.empty:
         for col in ["wind_speed", "wind_dir", "rel_wind_speed", "rel_wind_dir", "rel_wind_u", "rel_wind_v"]:
             df_closest[col] = np.nan
@@ -242,19 +250,27 @@ def add_wind_to_ship_passes(df_closest, ds):
     # values are collected in row order and assigned as whole columns, not by index label:
     # two ships passing in the same second share a time index
     mast_heights = [h for h in MAST_HEIGHTS if f'wind_speed_mast_{h}' in ds.columns]
-    columns = ['wind_speed', 'wind_dir']
+    if mast_height is not None and mast_height not in mast_heights:
+        print(f"Warning: no meteomast wind at {mast_height} m, using the Airpointer wind for the ship passes.")
+    columns = ['wind_speed', 'wind_dir', 'wind_source', 'wind_speed_airpointer', 'wind_dir_airpointer']
     columns += [f'wind_{v}_mast_{h}' for h in mast_heights for v in ('speed', 'dir')]
     columns += ['rel_wind_speed', 'rel_wind_dir', 'rel_wind_u', 'rel_wind_v']
     values = {col: [] for col in columns}
     for t, row in df_closest.iterrows():
-        wind_speed, wind_dir = calc_mean_wind(ds, t)
-        values['wind_speed'].append(wind_speed)
-        values['wind_dir'].append(wind_dir)
+        ap_speed, ap_dir = calc_mean_wind(ds, t)
+        values['wind_speed_airpointer'].append(ap_speed)
+        values['wind_dir_airpointer'].append(ap_dir)
+        wind_speed, wind_dir, wind_source = ap_speed, ap_dir, 'airpointer'
         # meteomast wind at all heights (if read in by read_in_situ)
         for h in mast_heights:
             mast_speed, mast_dir = calc_mean_wind(ds, t, speed_col=f'wind_speed_mast_{h}', dir_col=f'wind_dir_mast_{h}')
             values[f'wind_speed_mast_{h}'].append(mast_speed)
             values[f'wind_dir_mast_{h}'].append(mast_dir)
+            if h == mast_height and not (np.isnan(mast_speed) or np.isnan(mast_dir)):
+                wind_speed, wind_dir, wind_source = mast_speed, mast_dir, f'mast_{h}'
+        values['wind_speed'].append(wind_speed)
+        values['wind_dir'].append(wind_dir)
+        values['wind_source'].append(wind_source)
         # compute relative wind seen from the moving ship using Mean_Speed and Mean_Course
         ship_speed = row.get('Mean_Speed', np.nan)
         ship_course = row.get('Mean_Course', np.nan)
