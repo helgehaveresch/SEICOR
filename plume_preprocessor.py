@@ -21,8 +21,7 @@ elif _platform.startswith("linux"):
 SCRIPTS_DIR = Path("SCRIPTS_DIR", _default_scripts_dir)
 SETTINGS_PATH = Path("PLUME_SETTINGS_PATH", _default_settings_path)
 
-import xarray as xr
-import pandas as pd
+import numpy as np
 sys.path.append(str(SCRIPTS_DIR))
 from doas_tools.file_handling import read_SC_file_imaging
 from imaging_tools.process_SC import mask_zenith, correct_destriped_for_noon_reference
@@ -35,7 +34,8 @@ import SEICOR.impact
 import SEICOR.enhancements
 import SEICOR.plotting
 import SEICOR.plumes
-import SEICOR.wind  
+import SEICOR.wind
+import SEICOR.era5
 
 with open(SETTINGS_PATH, "r") as file:
     settings = yaml.safe_load(file)
@@ -68,7 +68,6 @@ enhancement_settings    = processing_settings["enhancement"]
 window_minutes          = (processing_settings["plume_window"]["before_minutes"], processing_settings["plume_window"]["after_minutes"])
 ref_settings            = processing_settings["reference_search"]
 reference_search_kwargs = dict(                     # passed to both enhancement functions
-    window_minutes=window_minutes,
     ref_start_offset=ref_settings["start_offset_minutes"],
     ref_search_minutes=ref_settings["search_minutes"],
     ref_window_minutes=ref_settings["window_minutes"],
@@ -91,6 +90,9 @@ if do_ref_correction:
     ds_ref_corr = read_SC_file_imaging(IMPACT_path, date, SC_ref_offset_corr)
     ds_impact = correct_destriped_for_noon_reference(ds_impact, ds_ref_corr)
 ds_impact = mask_zenith(ds_impact)
+# drop the lowest viewing directions (index 0 = lowest VEA); the viewing_direction coordinate keeps the
+# original numbers, so image_row in the plume files and the row settings still refer to the same elevations
+ds_impact = ds_impact.isel(viewing_direction=slice(instrument_settings.get("drop_lowest_viewing_directions", 0), None))
 if enhancement_settings["calculate_rolling_background"]:
     ds_impact = SEICOR.enhancements.rolling_background_enh(ds_impact, window_size=enhancement_settings["rolling_background_window"])
 ds_impact = SEICOR.impact.rolling_impact(ds_impact, window=processing_settings["quality"]["rolling_mean_window"])
@@ -107,6 +109,20 @@ except Exception as e:
     print("Error in in-situ processing block:", e)
     traceback.print_exc()
     df_insitu = None
+#%% Initialize ERA5 profile above the ship corridor
+try:
+    era5_profile = SEICOR.era5.read_era5_corridor(BASEPATH / instrument_settings["era5_dir"], date, instrument_settings["ship_corridor_location"])
+except Exception as e:
+    print("Error reading ERA5:", e)
+    traceback.print_exc()
+    era5_profile = None
+#%% Initialize flip-corrected LIDAR wind (written by wind_model_meteomast_lidar_comparison.py, 2026 only)
+try:
+    df_lidar = SEICOR.plumes.read_lidar_corrected(Path(settings["bredom_paths"][_plat_key]) / instrument_settings["lidar_file"])
+except Exception as e:
+    print("Error reading LIDAR:", e)
+    traceback.print_exc()
+    df_lidar = None
 #%% Initialize lp-doas data
 try:
     df_lp_doas_310 = SEICOR.lp_doas.read_lpdoas_310(lp_doas_dir, date)
@@ -162,17 +178,27 @@ Path(plumes_out_dir).mkdir(parents=True, exist_ok=True)
 with open(plumes_out_dir / "plume_preprocessor_settings_used.yaml", "w") as file:
     yaml.safe_dump({**settings, "date": date}, file, sort_keys=False)
 
+# inputs of the plume dataset that are the same for every ship pass and plume window
+plume_ds_kwargs = dict(
+    ds_impact=ds_impact,
+    measurement_times=measurement_times,
+    ship_passes=ship_passes,
+    filtered_ship_groups=filtered_ship_groups,
+    df_insitu=df_insitu,
+    df_lp_310=df_lp_doas_310,
+    df_lp_365=df_lp_doas_365,
+    nlin_param_file=enhancement_settings["nlin_param_file"] if enhancement_settings["run_upwind_doas_fit"] else None,
+    impact_path=IMPACT_path,
+    **reference_search_kwargs,
+)
+
+extend_step = processing_settings["plume_window"]["extend_step_minutes"]
+max_extensions = processing_settings["plume_window"]["max_extensions"]
+
 # rows are addressed by position (pos), not by the time index: two ships passing in the same second share a time index
 for pos, (idx, ship_pass_single) in enumerate(ship_passes.iterrows()):
-    ds_plume = SEICOR.enhancements.upwind_constant_background_enh(ship_pass_single, ds_impact, measurement_times, ship_passes,
-                                                                  df_lp_310=df_lp_doas_310, df_lp_365=df_lp_doas_365, **reference_search_kwargs)
+    ds_plume = SEICOR.enhancements.build_plume_ds(ship_pass_single, window_minutes, **plume_ds_kwargs)
     if ds_plume is not None:
-        ds_plume = SEICOR.plumes.add_ship_trajectory_to_plume_ds(ds_plume, filtered_ship_groups)
-        ds_plume = SEICOR.plumes.add_insitu_to_plume_ds(ds_plume, df_insitu)
-        if enhancement_settings["run_upwind_doas_fit"]:
-            ds_plume = SEICOR.impact.call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds_plume, ship_pass_single, enhancement_settings["nlin_param_file"], IMPACT_path)
-        ds_plume = SEICOR.enhancements.upwind_downwind_interp_background_enh(ds_plume, ship_pass_single, ds_impact, measurement_times, ship_passes,
-                                                                             **reference_search_kwargs)
         ds_plume = SEICOR.plumes.sort_plumes(
             ds_plume, out_dir, date=date,
             p_threshold_plume=detection_settings["p_threshold_plume"],
@@ -183,35 +209,43 @@ for pos, (idx, ship_pass_single) in enumerate(ship_passes.iterrows()):
         )
 
         if ds_plume.attrs.get("plume_or_ship_found", "False") == "True":
-            # plume mask, background statistics from the upwind (and downwind) reference images
-            ref_image = ds_plume["no2_ref"] - ds_plume["no2_ref"].mean(dim="window_ref")
-            if "no2_ref_down" in ds_plume:
-                ref_image_down = ds_plume["no2_ref_down"] - ds_plume["no2_ref_down"].mean(dim="window_ref_down")
-                ref_image_down = ref_image_down.rename({"window_ref_down": "window_ref"})  # unify dimension name
-                ref_image = xr.concat([ref_image, ref_image_down], dim="window_ref",join="outer")
-            ref_image_mean = ref_image.mean()
-            ref_image_std = ref_image.std()
-            mask = SEICOR.plumes.detect_plume_ztest(
-                ds_plume["no2_enhancement_interp"].values,
-                bg_mean=ref_image_mean.values,
-                bg_std=ref_image_std.values,
-                p_threshold=plume_mask_settings["p_threshold"],
-                min_cluster_size=plume_mask_settings["min_cluster_size"],
-                connectivity=plume_mask_settings["connectivity"],
-                kernel_arm=plume_mask_settings["kernel_arm"],
-                require_connection=plume_mask_settings["require_connection"],
-                ds_plume=ds_plume,
-                keep_second_largest=False,
-                second_size_threshold=100,
-            )
-            # store enhancement plume mask in the plume dataset
-            ds_plume = ds_plume.assign(plume_mask=(["image_row", "window_plume"], mask.astype(bool)))
+            # plume mask; while it touches the left/right edge of the plume window, extend the window
+            # on that side by extend_step minutes (the references move along) and mask again.
+            # The step with the biggest plume cluster whose references do not overlap it is saved.
+            detection_attrs = dict(ds_plume.attrs)
+            before, after = window_minutes
+            best = None
+            for n_ext in range(max_extensions + 1):
+                if n_ext > 0:
+                    ds_new = SEICOR.enhancements.build_plume_ds(ship_pass_single, (before, after), **plume_ds_kwargs)
+                    if ds_new is None or "no2_ref" not in ds_new:
+                        break  # no clean upwind reference for the extended window
+                    ds_new.attrs = {**detection_attrs, **ds_new.attrs}
+                    ds_plume = ds_new
+                mask, ship_mask = SEICOR.plumes.plume_mask_of(ds_plume, plume_mask_settings)
+                if SEICOR.plumes.reference_hits_plume(ds_plume, mask):
+                    print(f"Reference overlaps the masked plume for MMSI {ship_pass_single['MMSI']} at {idx}, "
+                          f"window ({before}, {after}) min not used")
+                elif best is None or mask.sum() > best[1].sum():
+                    best = (ds_plume, mask, ship_mask, n_ext)
+                hits_left, hits_right = bool(mask[:, 0].any()), bool(mask[:, -1].any())
+                if not (hits_left or hits_right):
+                    break
+                before += extend_step * hits_left
+                after += extend_step * hits_right
+            if best is None:  # every step overlapped a reference: keep the last window without a plume mask
+                best = (ds_plume, np.zeros_like(mask), ship_mask, n_ext)
+            ds_plume, mask, ship_mask, n_used = best
+            ds_plume.attrs["plume_window_extensions"] = n_used
+            # store enhancement plume mask (and the ship mask excluded from the background) in the plume dataset
+            ds_plume = ds_plume.assign(plume_mask=(["image_row", "window_plume"], mask),
+                                       ship_mask=(["image_row", "window_plume"], ship_mask))
 
             if settings["Plotting"]["generate_plots"]:
                 SEICOR.plotting.plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date)
-                ref_image = ds_plume["no2_ref"] - ds_plume["no2_ref"].mean(dim="window_ref")
-                ref_mask = SEICOR.plumes.detect_plume_ztest(ref_image.values, p_threshold=0.15, min_cluster_size=30, ds_plume=ds_plume)
-                SEICOR.plotting.plot_reference_image_with_plume_mask(ref_image, ref_mask, ds_plume, out_dir, date)
+                SEICOR.plotting.plot_reference_image_with_plume_mask(ds_plume, out_dir, date)
+        ds_plume = SEICOR.era5.add_era5_to_plume_ds(ds_plume, era5_profile, instrument_settings["era5_max_height_m"])
+        ds_plume = SEICOR.plumes.add_lidar_to_plume_ds(ds_plume, df_lidar)
         ds_plume.to_netcdf(Path(ship_pass_single['plume_file']), mode="w")
         # record result back into ship_passes dataframe so it can be saved
         ship_passes.iat[pos, ship_passes.columns.get_loc('plume_or_ship_found')] = ds_plume.attrs.get('plume_or_ship_found', 'False')
