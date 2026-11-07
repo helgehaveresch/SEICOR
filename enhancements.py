@@ -2,7 +2,23 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from numpy.fft import fft, ifft, fftfreq
+import SEICOR.impact
 import SEICOR.plumes
+
+
+def _utc(t):
+    t = pd.Timestamp(t)
+    return t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC")
+
+
+def _azimuths(ds_impact):
+    """Viewing azimuth of every measurement, rounded to 0.1 deg (the instrument switches azimuth)."""
+    return np.round(ds_impact["viewing-azimuth-angle"].isel(viewing_direction=0).values.astype(float), 1)
+
+
+def _azimuth_at(ds_impact, measurement_times, t):
+    i = int(np.argmin(np.abs((measurement_times - _utc(t)).total_seconds())))
+    return _azimuths(ds_impact)[i]
 
 
 def rolling_background_enh(ds, window_size=500): 
@@ -17,12 +33,13 @@ def find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, di
                           ref_min_span_seconds=40, ref_min_count=100, other_ship_minutes=5,
                           ztest_p_threshold=0.15, ztest_min_cluster_size=20):
     """Searches a clean reference window of `ref_window_minutes` before (direction="up") or
-    after (direction="down") the ship pass at `t`, stepping 1 min per try from `start_offset`
-    up to `ref_search_minutes`.
+    after (direction="down") the ship pass at `t`, stepping 30 s per rejected try from `start_offset`
+    up to `ref_search_minutes`. `start_offset` is the distance of the window start from `t`
+    (direction="up": the window ends `ref_window_minutes` later, i.e. closer to `t`).
 
-    A window is accepted if no other ship pass lies within `other_ship_minutes` of it, it holds at
-    least `ref_min_count` measurements covering at least `ref_min_span_seconds`, and the z-test
-    finds no plume in it.
+    A window is accepted if no other ship pass lies within `other_ship_minutes` of it, all its
+    measurements have the viewing azimuth of the pass, it holds at least `ref_min_count`
+    measurements covering at least `ref_min_span_seconds`, and the z-test finds no plume in it.
 
     Returns (window_ref, ref_start, ref_end) with window_ref a boolean mask over measurement_times,
     or None if no clean window was found.
@@ -32,6 +49,8 @@ def find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, di
         other_times = other_times.tz_localize("UTC")
     other_times = other_times.tz_convert("UTC").values
     min_separation = np.timedelta64(int(other_ship_minutes * 60), "s")
+    azimuths = _azimuths(ds_impact)
+    az_pass = _azimuth_at(ds_impact, measurement_times, t)
 
     offset = start_offset
     while offset < ref_search_minutes:
@@ -41,7 +60,7 @@ def find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, di
         else:
             ref_start = t + pd.Timedelta(minutes=offset)
             ref_end = t + pd.Timedelta(minutes=offset + ref_window_minutes)
-        offset += 1
+        offset += 0.5  # shift a rejected window by 30 s
 
         window_ref = (measurement_times >= ref_start) & (measurement_times < ref_end)
         n_ref = int(window_ref.sum())
@@ -50,6 +69,9 @@ def find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, di
         ref_times = measurement_times[window_ref]
         # other ships passing close to the reference window
         if other_times.size and (np.abs(ref_times.values[:, None] - other_times[None, :]) < min_separation).any():
+            continue
+        # same viewing azimuth as the pass (the instrument switches azimuth)
+        if np.any(azimuths[window_ref] != az_pass):
             continue
         # minimum number of samples and timespan
         span_seconds = (ref_times.max() - ref_times.min()).total_seconds()
@@ -86,8 +108,10 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
               (measurement_times < t + pd.Timedelta(minutes=window_minutes[1])))
 
     # Find upwind reference window
+    # upwind reference ends ref_start_offset minutes before the start of the plume window
     upwind = find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, direction="up",
-                                   start_offset=ref_start_offset, ref_search_minutes=ref_search_minutes,
+                                   start_offset=window_minutes[0] + ref_start_offset + ref_window_minutes,
+                                   ref_search_minutes=ref_search_minutes,
                                    ref_window_minutes=ref_window_minutes,
                                    ref_min_span_seconds=ref_min_span_seconds, ref_min_count=ref_min_count,
                                    other_ship_minutes=other_ship_minutes,
@@ -266,8 +290,10 @@ def upwind_downwind_interp_background_enh(ds, row,
     if "window_ref" in ds.coords:
         window_ref = np.isin(ds_impact["dim_0"].values, ds["window_ref"].values)
     else:
+        # upwind reference ends ref_start_offset minutes before the start of the plume window
         upwind = find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, direction="up",
-                                       start_offset=ref_start_offset, **search_kwargs)
+                                       start_offset=window_minutes[0] + ref_start_offset + ref_window_minutes,
+                                       **search_kwargs)
         if upwind is None:
             print(f"No clean upwind reference window found for MMSI {mmsi} at {t}")
             return ds
@@ -369,7 +395,31 @@ def upwind_downwind_interp_background_enh(ds, row,
         )
     return ds
 
-def polynomial_background_enh(ds_impact_masked, degree=8): 
+def build_plume_ds(row, window_minutes, ds_impact, measurement_times, ship_passes, filtered_ship_groups, df_insitu,
+                   df_lp_310=None, df_lp_365=None, nlin_param_file=None, impact_path=None, **reference_search_kwargs):
+    """Plume dataset of one ship pass (row from ship_passes) for a plume window of
+    window_minutes = (before, after) the pass: constant (upwind) and interpolated (upwind/downwind)
+    background enhancements. The references are searched outside the plume window, with
+    reference_search_kwargs passed to both enhancement functions.
+
+    The upwind DOAS fit only runs if nlin_param_file is given. Returns None if there is no
+    measurement or upwind reference.
+    """
+    ds = upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passes, window_minutes=window_minutes,
+                                        df_lp_310=df_lp_310, df_lp_365=df_lp_365, **reference_search_kwargs)
+    if ds is None:
+        return None
+    ds = SEICOR.plumes.add_ship_trajectory_to_plume_ds(ds, filtered_ship_groups)
+    ds = SEICOR.plumes.add_insitu_to_plume_ds(ds, df_insitu)
+    if nlin_param_file is not None:
+        ds = SEICOR.impact.call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds, row, nlin_param_file, impact_path)
+    ds = upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times, ship_passes,
+                                               window_minutes=window_minutes, **reference_search_kwargs)
+    ds.attrs["window_before_minutes"] = window_minutes[0]
+    ds.attrs["window_after_minutes"] = window_minutes[1]
+    return ds
+
+def polynomial_background_enh(ds_impact_masked, degree=8):
     time_diff = pd.to_datetime(ds_impact_masked["datetime"]) - pd.to_datetime(ds_impact_masked["datetime"])[0]
     x = time_diff.total_seconds().astype(float)
     y = ds_impact_masked["a[NO2]"]
