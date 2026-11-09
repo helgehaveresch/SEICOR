@@ -236,8 +236,8 @@ for pos, (idx, ship_pass_single) in enumerate(ship_passes.iterrows()):
     if ds_plume.attrs.get("plume_or_ship_found", "False") == "True":
         # plume mask; while it touches the left or right edge of the plume window, extend the window
         # on that side by extend_step minutes (the references move along) and mask again. The window
-        # is extended in one direction only: the side of the first extension (the edge the mask
-        # touches; if both, the edge with more masked pixels, "after" on a tie) is kept.
+        # is extended in one direction only, set at the first extension: "after" if the mask touches
+        # the right edge, "before" only if it touches the left edge but not the right one.
         # The step with the biggest plume cluster whose references do not overlap it is saved.
         detection_attrs = dict(ds_plume.attrs)
         before, after = window_minutes
@@ -258,7 +258,7 @@ for pos, (idx, ship_pass_single) in enumerate(ship_passes.iterrows()):
                 best = (ds_plume, mask, ship_mask, n_ext)
             left_px, right_px = int(mask[:, 0].sum()), int(mask[:, -1].sum())
             if direction is None and (left_px or right_px):
-                direction = "before" if left_px > right_px else "after"
+                direction = "after" if right_px else "before"
             if direction is None or (direction == "before" and not left_px) or (direction == "after" and not right_px):
                 break  # the mask does not touch the edge of the extension direction
             if direction == "before":
