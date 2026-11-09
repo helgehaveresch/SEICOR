@@ -61,6 +61,63 @@ def set_elevation_yticks(ax, vea, step=5, fontsize=None, row_offset=0.0):
         ax.tick_params(axis="y", labelsize=fontsize)
 
 
+def positive_color_limit(data):
+    """Limit of the symmetric colour scale (vmin=-limit, vmax=limit) of the bwr enhancement images:
+    the highest positive value, so that strongly negative pixels (e.g. the ship) do not stretch the
+    scale; values below -limit saturate. The largest absolute value if nothing is positive."""
+    data = np.asarray(data, dtype=float)
+    if not np.isfinite(data).any():
+        return 0.0
+    top = np.nanmax(data)
+    return float(top) if top > 0 else float(np.nanmax(np.abs(data)))
+
+
+MAX_GAP_SECONDS = 6.0  # measurement gaps longer than this are drawn white in the time-row images
+GAP_STEP_FACTOR = 1.5  # time steps longer than this times the typical step (e.g. one empty 1.5 s bin) are drawn white as well
+
+
+def gap_aware_time_edges(times, max_gap_seconds=MAX_GAP_SECONDS):
+    """Column edges (matplotlib date numbers) for a pcolormesh image with one column per time.
+
+    Edges lie midway between neighbouring times. A gap is a time step longer than max_gap_seconds
+    or longer than GAP_STEP_FACTOR times the typical step (median spacing), so a single missing
+    measurement of regularly spaced (coarsened) data is a gap too. Across a gap the
+    columns on both sides end half a typical time step (median spacing) from their time, and the
+    gap gets a column of its own, which expand_gap_columns fills with NaN, i.e. leaves white,
+    instead of stretching the neighbouring pixels over the gap.
+    Returns (xedges, columns): columns[i] is the data column drawn in mesh column i, -1 for a gap.
+    """
+    x = mdates.date2num(np.asarray(pd.to_datetime(times).values, dtype="datetime64[ns]"))
+    n = len(x)
+    if n == 0:
+        return np.array([]), np.array([], dtype=int)
+    one_second = 1.0 / 86400.0
+    dx = np.diff(x)
+    step = np.median(dx) if n > 1 else one_second
+    is_gap = (dx > max_gap_seconds * one_second) | (dx > GAP_STEP_FACTOR * step)
+    half = np.where(is_gap, np.minimum(step, dx), dx) / 2.0  # half width towards the next time
+    first_half = half[0] if n > 1 else step / 2.0
+    last_half = half[-1] if n > 1 else step / 2.0
+    xedges = np.concatenate(([x[0] - first_half], x[:-1] + half, [x[-1] + last_half]))
+    gaps = np.flatnonzero(is_gap)
+    xedges = np.insert(xedges, gaps + 2, x[gaps + 1] - half[gaps])  # left edge of the column after the gap
+    columns = np.insert(np.arange(n), gaps + 1, -1)
+    return xedges, columns
+
+
+def expand_gap_columns(data, columns, fill=np.nan):
+    """data (..., time) with the gap columns of gap_aware_time_edges inserted and set to fill."""
+    out = np.asarray(data, dtype=float)[..., np.maximum(columns, 0)]
+    out[..., columns < 0] = fill
+    return out
+
+
+def gap_aware_mesh(times, data, max_gap_seconds=MAX_GAP_SECONDS):
+    """(xedges, data with NaN gap columns) for pcolormesh of data (row, time) over times."""
+    xedges, columns = gap_aware_time_edges(times, max_gap_seconds)
+    return xedges, expand_gap_columns(data, columns)
+
+
 def plot_LOS(lon1, lon2, lat1, lat2, ax=None, label=None):
     """
     Plot lines from (lon1, lat1) to each unique (lon2, lat2) pair.
@@ -482,19 +539,22 @@ def plot_single_ship(
         times_sel = times_full
         no2_sel = no2_full
 
-    X, Y = np.meshgrid(times_sel, np.arange(no2_sel.shape[0]))
+    # pixel edges in time (measurement gaps > MAX_GAP_SECONDS stay white) and around the row centres
+    X, no2_mesh = gap_aware_mesh(times_sel, no2_sel)
+    Y = np.arange(no2_sel.shape[0] + 1) - 0.5
 
     if mode == "dSCD":
         plt.figure(figsize=(10, 6))
         ax = plt.gca()
         # choose symmetric color scale around zero based on data max abs value
         _data = np.array(no2_sel)
-        _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
+        _m = positive_color_limit(_data)
         pcm = ax.pcolormesh(
-            X, Y, no2_sel,
-            shading='auto',
+            X, Y, no2_mesh,
+            shading='flat',
             cmap='bwr', vmin=-_m, vmax=_m
         )
+        ax.xaxis_date()
         cbar = plt.colorbar(pcm)
         cbar.set_label(r"NO$_2$ dSCD / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=22)
         cbar.ax.tick_params(labelsize=18)
@@ -515,12 +575,13 @@ def plot_single_ship(
         ax = plt.gca()
         # symmetric color scale around zero based on data maximum absolute value
         _data = np.array(no2_full)
-        _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
+        _m = positive_color_limit(_data)
         pcm = ax.pcolormesh(
-            X, Y, no2_full,
-            shading='auto',
+            X, Y, no2_mesh,
+            shading='flat',
             cmap='bwr', vmin=-_m, vmax=_m
         )
+        ax.xaxis_date()
         cbar = plt.colorbar(pcm)
         cbar.set_label(r"NO$_2$ Enh. / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=22)
         cbar.ax.tick_params(labelsize=18)
@@ -569,12 +630,13 @@ def plot_single_ship(
         ax = axs[0]
         # symmetric bwr colormap: choose vmax from data magnitude
         _data = np.array(no2_full)
-        _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
+        _m = positive_color_limit(_data)
         pcm = ax.pcolormesh(
-            X, Y, no2_full,
-            shading='auto',
+            X, Y, no2_mesh,
+            shading='flat',
             cmap='bwr', vmin=-_m, vmax=_m
         )
+        ax.xaxis_date()
         cbar = plt.colorbar(pcm, ax=ax)
         cbar.set_label(r"NO$_2$ Enh. / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=20)
         cbar.ax.tick_params(labelsize=18)
@@ -762,10 +824,12 @@ def plot_ship_pass_subplot_v1(
     # NO2 enhancement 2D plot
     ax0 = fig.add_subplot(gs[0, 0])
     enh_var, enh_int_var, enh_label = enhancement_vars(ds_plume)
-    X, Y = np.meshgrid(ds_plume["times_window"], np.arange(ds_plume[enh_var].shape[0]))
+    X, enh_mesh = gap_aware_mesh(ds_plume["times_window"].values, ds_plume[enh_var].values)
+    Y = np.arange(ds_plume[enh_var].shape[0] + 1) - 0.5
     _data = np.array(ds_plume[enh_var].values)
-    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
-    pcm = ax0.pcolormesh(X, Y, ds_plume[enh_var], shading='auto', cmap='bwr', vmin=-_m, vmax=_m)
+    _m = positive_color_limit(_data)
+    pcm = ax0.pcolormesh(X, Y, enh_mesh, shading='flat', cmap='bwr', vmin=-_m, vmax=_m)
+    ax0.xaxis_date()
     fig.colorbar(pcm, ax=ax0, label=r"NO$_2$ Enhancement / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
     tstr_fname = pd.to_datetime(ds_plume.t).strftime('%Y%m%d_%H%M%S')
@@ -946,10 +1010,12 @@ def plot_ship_pass_subplot_v2(
     # NO2 enhancement 2D plot
     ax0 = fig.add_subplot(gs[0, 0])
     enh_var, enh_int_var, enh_label = enhancement_vars(ds_plume)
-    X, Y = np.meshgrid(times_num, np.arange(ds_plume[enh_var].shape[0]))
+    X, enh_mesh = gap_aware_mesh(times_index, ds_plume[enh_var].values)
+    Y = np.arange(ds_plume[enh_var].shape[0] + 1) - 0.5
     _data = np.array(ds_plume[enh_var].values)
-    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
-    pcm = ax0.pcolormesh(X, Y, ds_plume[enh_var], shading='auto', cmap='bwr', vmin=-_m, vmax=_m)
+    _m = positive_color_limit(_data)
+    pcm = ax0.pcolormesh(X, Y, enh_mesh, shading='flat', cmap='bwr', vmin=-_m, vmax=_m)
+    ax0.xaxis_date()
     fig.colorbar(pcm, ax=ax0, label=r"NO$_2$ Enhancement / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
     tstr_fname = pd.to_datetime(ds_plume.t).strftime('%Y%m%d_%H%M%S')
@@ -1664,25 +1730,16 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
     times = pd.to_datetime(ds_plume["times_plume"].values)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    # convert to matplotlib datenums and build edges for pcolormesh
-    xnum = mdates.date2num(times.to_pydatetime())
-    # compute edges by midpoints
-    dx = np.diff(xnum)
-    if len(dx) > 0:
-        left = xnum[0] - dx[0] / 2.0
-        right = xnum[-1] + dx[-1] / 2.0
-        xedges = np.concatenate(([left], xnum[:-1] + dx / 2.0, [right]))
-    else:
-        # single column
-        xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+    # pixel edges in time; measurement gaps > MAX_GAP_SECONDS get an empty (white) column
+    xedges, columns = gap_aware_time_edges(times)
     yedges = np.arange(ny + 1)
 
     _data = np.array(data)
-    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
-    mesh = ax.pcolormesh(xedges, yedges, data, cmap="bwr", shading="auto", vmin=-_m, vmax=_m)
+    _m = positive_color_limit(_data)
+    mesh = ax.pcolormesh(xedges, yedges, expand_gap_columns(data, columns), cmap="bwr", shading="flat", vmin=-_m, vmax=_m)
     # contour needs x coords for proper alignment; use mesh coordinates
     Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
-    ax.contour(Xc, Yc, mask.astype(int), levels=[0.5], colors="red", linewidths=1.5)
+    ax.contour(Xc, Yc, expand_gap_columns(mask, columns), levels=[0.5], colors="red", linewidths=1.5)
 
     ax.xaxis_date()
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
@@ -1720,26 +1777,20 @@ def plot_no2_enhancement_with_plume_and_ship_mask(ds_plume, plume_mask, ship_mas
     times = pd.to_datetime(ds_plume["times_plume"].values)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    xnum = mdates.date2num(times.to_pydatetime())
-    dx = np.diff(xnum)
-    if len(dx) > 0:
-        left = xnum[0] - dx[0] / 2.0
-        right = xnum[-1] + dx[-1] / 2.0
-        xedges = np.concatenate(([left], xnum[:-1] + dx / 2.0, [right]))
-    else:
-        xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+    # pixel edges in time; measurement gaps > MAX_GAP_SECONDS get an empty (white) column
+    xedges, columns = gap_aware_time_edges(times)
     yedges = np.arange(ny + 1)
 
     _data = np.array(data)
-    _m = np.nanmax(np.abs(_data)) if _data.size > 0 else 0.0
-    mesh = ax.pcolormesh(xedges, yedges, data, cmap="bwr", shading="auto", vmin=-_m, vmax=_m)
+    _m = positive_color_limit(_data)
+    mesh = ax.pcolormesh(xedges, yedges, expand_gap_columns(data, columns), cmap="bwr", shading="flat", vmin=-_m, vmax=_m)
 
     xcent = (xedges[:-1] + xedges[1:]) / 2.0
     ycent = (yedges[:-1] + yedges[1:]) / 2.0
     Xc, Yc = np.meshgrid(xcent, ycent)
 
-    plume_contour = ax.contour(Xc, Yc, np.asarray(plume_mask, dtype=int), levels=[0.5], colors="black", linewidths=1.5)
-    ship_contour = ax.contour(Xc, Yc, np.asarray(ship_mask, dtype=int), levels=[0.5], colors="blue", linewidths=1.5)
+    plume_contour = ax.contour(Xc, Yc, expand_gap_columns(plume_mask, columns), levels=[0.5], colors="black", linewidths=1.5)
+    ship_contour = ax.contour(Xc, Yc, expand_gap_columns(ship_mask, columns), levels=[0.5], colors="blue", linewidths=1.5)
 
     ax.xaxis_date()
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
@@ -1792,28 +1843,24 @@ def plot_reference_image_with_plume_mask(ds_plume, out_dir, date, p_threshold=0.
     all_total = np.concatenate([p[2].ravel() for p in panels])
     t_min, t_max = np.nanpercentile(all_total, [1, 99]) if np.isfinite(all_total).any() else (0.0, 1.0)
     all_var = np.concatenate([p[3].ravel() for p in panels])
-    v_max = np.nanmax(np.abs(all_var)) if np.isfinite(all_var).any() else 1.0
+    v_max = positive_color_limit(all_var) if np.isfinite(all_var).any() else 1.0
 
     vea_vals = ds_plume["vea"].values if "vea" in ds_plume else None
     fig, axes = plt.subplots(len(panels), 2, figsize=(16, 5 * len(panels)), squeeze=False, constrained_layout=True)
 
     for ax_row, (name, times, total, variability, mask) in zip(axes, panels):
         ny = total.shape[0]
-        xnum = mdates.date2num(times.to_pydatetime())
-        dx = np.diff(xnum)
-        if len(dx) > 0:
-            xedges = np.concatenate(([xnum[0] - dx[0] / 2.0], xnum[:-1] + dx / 2.0, [xnum[-1] + dx[-1] / 2.0]))
-        else:
-            xedges = np.array([xnum[0] - 0.5, xnum[0] + 0.5])
+        # pixel edges in time; measurement gaps > MAX_GAP_SECONDS get an empty (white) column
+        xedges, columns = gap_aware_time_edges(times)
         yedges = np.arange(ny + 1)
         span = f"{times[0]:%H:%M:%S}–{times[-1]:%H:%M:%S}" if len(times) else ""
 
-        mesh_total = ax_row[0].pcolormesh(xedges, yedges, total, cmap="viridis", shading="auto", vmin=t_min, vmax=t_max)
+        mesh_total = ax_row[0].pcolormesh(xedges, yedges, expand_gap_columns(total, columns), cmap="viridis", shading="flat", vmin=t_min, vmax=t_max)
         ax_row[0].set_title(f"{name} reference {span}: total NO$_2$ dSCD")
-        mesh_var = ax_row[1].pcolormesh(xedges, yedges, variability, cmap="bwr", shading="auto", vmin=-v_max, vmax=v_max)
+        mesh_var = ax_row[1].pcolormesh(xedges, yedges, expand_gap_columns(variability, columns), cmap="bwr", shading="flat", vmin=-v_max, vmax=v_max)
         Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
         if mask.any():
-            ax_row[1].contour(Xc, Yc, mask.astype(int), levels=[0.5], colors="red", linewidths=1.5)
+            ax_row[1].contour(Xc, Yc, expand_gap_columns(mask, columns), levels=[0.5], colors="red", linewidths=1.5)
         ax_row[1].set_title(f"{name} reference: variability (std {np.nanstd(variability):.2e})")
 
         for ax in ax_row:

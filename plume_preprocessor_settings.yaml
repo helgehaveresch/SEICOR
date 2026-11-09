@@ -47,8 +47,13 @@ processing:
       - 9.8
     max_ship_length: 20 #in meters
     distance_threshold: 0.002 #minimum ship distance in degrees from the instrument LOS
+    close_pass_minutes: 3 # two passes within this time show the same images:
+    close_pass_small_length_m: 60 # ... then the pass of the smaller ship is dropped if it is shorter than this
 
-  quality: 
+  coarsen: # IMPACT measurements are averaged in fixed time bins right after reading, before any processing; saved to Output/impact_coarsened_out_dir
+    time_resolution_seconds: 1.5 # bin length (bins aligned to midnight UTC, empty bins dropped); null = no coarsening. Settings below that count measurements or pixels stay in RAW measurements; the preprocessor divides them by the raw measurements per bin (impact.SAMPLE_COUNT_SETTINGS)
+
+  quality:
     min_rms_IMPACT: 0.01 #not applied in ervery operation!
     min_rms_lp_doas: 0.0005
     rolling_mean_window: 40
@@ -66,8 +71,8 @@ processing:
   plume_window: # time window around the ship pass that is stored and analysed
     before_minutes: 1
     after_minutes: 3
-    extend_step_minutes: 2 # if the plume mask touches the left/right edge, extend the window on that side by this and mask again
-    max_extensions: 20 # maximum number of extension steps
+    extend_step_minutes: 2 # if the plume mask touches the left/right edge, extend the window on that side by this and mask again; only in one direction per pass (the side of the first extension)
+    max_extensions: 5 # maximum number of extension steps
 
   reference_search: # clean up- and downwind reference windows (enhancements.find_reference_window)
     start_offset_minutes: 1 # gap between plume window and reference: upwind ends this long before the start, downwind starts this long after the end of the plume window
@@ -75,25 +80,28 @@ processing:
     window_minutes: 1 # length of the reference window
     min_count: 100 # minimum number of measurements in the reference window
     min_span_seconds: 40 # minimum time covered by these measurements
-    other_ship_minutes: 4 # no other ship pass within this time of the reference window
-    ztest_p_threshold: 0.18 # z-test that must find no plume in the reference window
-    ztest_min_cluster_size: 20
+    other_ship_minutes: null # no other ship pass within this time of the reference window; null/0 = no check (a reference may contain other ships' plumes anyway, only the z-test below excludes plume structure)
+    other_ship_min_length_m: 70 # only other ships longer than this block a reference window (unknown length always blocks); null = all ships
+    ztest_p_threshold: 0.16 # z-test that must find no plume in the reference window
+    ztest_min_cluster_size: 60
 
   detection: # plume / ship flag (plumes.sort_plumes)
-    p_threshold_plume: 0.03
+    p_threshold_plume: 0.02
     p_threshold_ship: 0.02
-    time_tolerance_seconds: 50 # searched within +- this time around the pass
+    time_tolerance_seconds: 60 # searched within +- this time around the pass
     plume_rows: [8, 20] # image rows (VEA) searched for the plume, python slice [start, stop)
     ship_rows: [4, 10] # image rows searched for the ship itself
+    plume_min_cluster_size: 5 # minimum plume cluster size in pixels (raw measurements)
+    ship_min_cluster_size: 20 # minimum ship cluster size in pixels (raw measurements)
 
   plume_mask: # plume_mask stored in the plume files (only for passes with a plume or ship found), iterative z-test (plumes.detect_plume_ztest_iterative)
-    p_threshold: 0.19
-    min_cluster_size: 5
+    p_threshold: 0.16
+    min_cluster_size: 30 # in pixels of the (coarsened) image, NOT scaled with the coarsening
     kernel_arm: 1
     connectivity: 1
     merge_max_gap_seconds: 15 # clusters at most this far apart in time on similar rows become one cluster; null switches this off
     merge_max_row_distance: 2 # rows at most this far apart count as similar elevation angles
-    merge_min_cluster_size: 60 # only clusters with at least this many pixels are merged
+    merge_min_cluster_size: 70 # only clusters with at least this many pixels are merged
     merge_max_cluster_size: 200 # only clusters with at most this many pixels are merged, whether source-connected or neighbouring; null means no limit
     merge_max_extension_minutes: 5 # merged clusters reach at most this far before or after the source-connected cluster; null means no limit
     require_connection: true
@@ -101,13 +109,16 @@ processing:
     ship_min_cluster_size: 20 # as in the ship detection of sort_plumes
     max_iter: 10 # first iteration uses the reference statistics, the following ones the re-estimated background
     stop_pixels: 15 # stop when the plume|ship mask changes by at most this many pixels
-    bg_include_references: true # re-estimated background = reference pixels + plume-window pixels outside plume and ship
+    bg_include_references: false # re-estimated background = reference pixels + plume-window pixels outside plume and ship
+    bg_offset_from_window: true # background level from the plume window itself (median, then pixels outside plume/ship), so an offset of the whole window against the references is not plume
+    min_background_fraction: 0.3 # after masking, the mean of the enhancement image outside plume and ship is subtracted (warning if mean > std) if at least this fraction of the pixels lies outside plume and ship
 
 Output:
   plots_out_dir: "analysis_test"
   img_out_dir: "video_test"
   ship_passes_out_dir: "ship_passes_test"
   plume_out_dir: "plumes_test"
+  impact_coarsened_out_dir: "IMPACT_coarsened" # IMPACT_<date>_<time_resolution>s.nc, only written if coarsened
 
 Plotting:
   generate_plots: true

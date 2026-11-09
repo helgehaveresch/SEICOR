@@ -462,6 +462,24 @@ def filter_ship_passes(df_ais, ship_groups, filtered_ship_groups, start_time, en
 
     return df_ais, filtered_ship_groups, maskedout_groups, df_ship_passes
 
+def drop_small_close_passes(ship_passes, max_gap_minutes=3, small_length_m=60):
+    """Remove the pass of the smaller ship when two ships pass within max_gap_minutes of each other
+    and the smaller one is shorter than small_length_m: both passes show the same images, and the
+    plume in them is attributed to the larger ship. Passes of equal or unknown length are kept.
+    Returns (ship_passes without these passes, the removed passes)."""
+    times = pd.to_datetime(ship_passes.index).values
+    length = pd.to_numeric(ship_passes["Length_in_m"], errors="coerce").to_numpy(dtype=float)
+    max_gap = np.timedelta64(int(max_gap_minutes * 60), "s")
+    drop = np.zeros(len(ship_passes), dtype=bool)
+    for i in range(len(ship_passes)):
+        if not length[i] < small_length_m:  # also False for unknown length
+            continue
+        close = np.abs(times - times[i]) <= max_gap
+        close[i] = False
+        drop[i] = np.any(close & (length > length[i]))
+    return ship_passes[~drop], ship_passes[drop]
+
+
 def sort_ship_sizes(ship_group):
     """
     Sort ships into categories based on their size.

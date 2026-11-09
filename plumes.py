@@ -4,6 +4,7 @@ import numpy as np
 import xarray as xr
 import pandas as pd
 import os
+import warnings
 from scipy import ndimage
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
@@ -204,12 +205,20 @@ def _detect_plume_ztest_core(
     merge_min_cluster_size=40,
     merge_max_cluster_size=None,
     merge_max_extension_minutes=None,
+    exclude_mask=None,
 ):
+    """Right-sided neighborhood Z-test (plume pixels) with cluster selection.
+
+    Pixels in exclude_mask (e.g. the ship mask) do not enter the neighborhood means and
+    cannot become plume pixels.
+    """
     if image.ndim != 2:
         raise ValueError("image must be 2D")
 
     bg_mean = np.asarray(bg_mean)
     bg_std = np.asarray(bg_std)
+    if exclude_mask is not None:
+        image = np.where(np.asarray(exclude_mask, dtype=bool), np.nan, np.asarray(image, dtype=float))
 
     # build cross-shaped footprint for neighborhood mean
     size = 2 * kernel_arm + 1
@@ -229,6 +238,8 @@ def _detect_plume_ztest_core(
     pvals = norm.cdf(-z)
 
     mask = (pvals <= p_threshold) & (~np.isnan(pvals))
+    if exclude_mask is not None:
+        mask &= ~np.asarray(exclude_mask, dtype=bool)  # the neighborhood mean of an excluded pixel is still defined
 
     if median_kernel_arm is None:
         median_kernel_arm = kernel_arm + 1
@@ -436,20 +447,31 @@ def detect_plume_ztest_iterative(
     merge_min_cluster_size=40,
     merge_max_cluster_size=None,
     merge_max_extension_minutes=None,
+    bg_offset_from_window=False,
 ):
     """
     Iterative neighborhood Z-test.
 
-    Each iteration detects plume pixels (right-sided test, _detect_plume_ztest_core) and
-    ship pixels (left-sided test, detect_plume_ztest_left) on the original image. The
+    Each iteration first detects ship pixels (left-sided test, detect_plume_ztest_left) and
+    then plume pixels (right-sided test, _detect_plume_ztest_core) on the original image,
+    with the ship pixels left out of the neighborhood means of the plume test. The
     background mean/std of the next iteration are then estimated from the image with the
     union of plume and ship pixels masked out, plus the pixels in bg_extra (e.g. the
-    reference images). The loop stops when the union mask changes by at most stop_pixels,
+    reference images). So the ship pixels never enter the background statistics or the
+    plume test. The loop stops when the union mask changes by at most stop_pixels,
     nothing is detected, or max_iter is reached.
 
     If bg_mean/bg_std are given, they are used for the first iteration only (e.g. the
     statistics of the reference images); otherwise the first iteration estimates them from
-    the full image (plus bg_extra).
+    the full image (plus bg_extra), finds the ship with them and re-estimates them without
+    the ship pixels before the plume test.
+
+    bg_offset_from_window: the background level is taken from the image itself, so that an
+    offset of the whole image against the references (bg_extra) is background, not plume.
+    The first plume test then uses the median of the image without the ship pixels as
+    background mean (bg_std as given). Later iterations take the mean only from the image
+    pixels outside plume and ship, and the std pooled from these pixels and bg_extra, each
+    relative to its own mean; the bg_mean > bg_std guard is not applied.
 
     Returns:
         plume_mask, ship_mask, plume_masks, ship_masks
@@ -465,6 +487,13 @@ def detect_plume_ztest_iterative(
     extra = np.array([]) if bg_extra is None else np.asarray(bg_extra, dtype=float).ravel()
 
     def _bg_stats(excluded):
+        if bg_offset_from_window:
+            window = image[~excluded].ravel()
+            if not np.isfinite(window).any():
+                return current_bg_mean, current_bg_std  # everything masked: keep the statistics
+            mean = np.nanmean(window)
+            residuals = np.concatenate([window - mean, extra - np.nanmean(extra) if extra.size else extra])
+            return mean, np.nanstd(residuals, ddof=0)
         pixels = np.concatenate([image[~excluded].ravel(), extra])
         mean, std = np.nanmean(pixels), np.nanstd(pixels, ddof=0)
         # guard: a background mean above the noise level means the plume is not masked well
@@ -476,10 +505,14 @@ def detect_plume_ztest_iterative(
         return mean, std
 
     no_mask = np.zeros(image.shape, dtype=bool)
-    if bg_mean is None or bg_std is None:
-        est_mean, est_std = _bg_stats(no_mask)
-        current_bg_mean = est_mean if bg_mean is None else bg_mean
-        current_bg_std = est_std if bg_std is None else bg_std
+
+    def _initial_stats(excluded):
+        est_mean, est_std = _bg_stats(excluded)
+        return (est_mean if bg_mean is None else bg_mean), (est_std if bg_std is None else bg_std)
+
+    estimate_initial = bg_mean is None or bg_std is None
+    if estimate_initial:
+        current_bg_mean, current_bg_std = _initial_stats(no_mask)
     else:
         current_bg_mean, current_bg_std = bg_mean, bg_std
 
@@ -489,6 +522,21 @@ def detect_plume_ztest_iterative(
     ship_masks = []
 
     for i in range(max(int(max_iter), 1)):
+        # ship first, so that its pixels can be left out of the plume test
+        ship_mask = np.asarray(detect_plume_ztest_left(
+            image,
+            bg_mean=current_bg_mean,
+            bg_std=current_bg_std,
+            p_threshold=ship_p_threshold,
+            min_cluster_size=ship_min_cluster_size,
+            kernel_arm=ship_kernel_arm,
+            median_kernel_arm=ship_median_kernel_arm,
+            connectivity=ship_connectivity,
+        ), dtype=bool)
+        if i == 0 and bg_offset_from_window:
+            current_bg_mean = np.nanmedian(image[~ship_mask])  # background level of this image, robust to the plume
+        elif i == 0 and estimate_initial and ship_mask.any():
+            current_bg_mean, current_bg_std = _initial_stats(ship_mask)  # statistics without the ship pixels
         plume_mask = np.asarray(_detect_plume_ztest_core(
             image,
             bg_mean=current_bg_mean,
@@ -510,16 +558,7 @@ def detect_plume_ztest_iterative(
             merge_min_cluster_size=merge_min_cluster_size,
             merge_max_cluster_size=merge_max_cluster_size,
             merge_max_extension_minutes=merge_max_extension_minutes,
-        ), dtype=bool)
-        ship_mask = np.asarray(detect_plume_ztest_left(
-            image,
-            bg_mean=current_bg_mean,
-            bg_std=current_bg_std,
-            p_threshold=ship_p_threshold,
-            min_cluster_size=ship_min_cluster_size,
-            kernel_arm=ship_kernel_arm,
-            median_kernel_arm=ship_median_kernel_arm,
-            connectivity=ship_connectivity,
+            exclude_mask=ship_mask,
         ), dtype=bool)
         final_mask = plume_mask | ship_mask
         plume_masks.append(plume_mask.copy())
@@ -571,8 +610,51 @@ def plume_mask_of(ds, plume_mask_settings):
         merge_min_cluster_size=plume_mask_settings["merge_min_cluster_size"],
         merge_max_cluster_size=plume_mask_settings["merge_max_cluster_size"],
         merge_max_extension_minutes=plume_mask_settings["merge_max_extension_minutes"],
+        bg_offset_from_window=plume_mask_settings.get("bg_offset_from_window", False),
     )
     return np.asarray(mask, dtype=bool), np.asarray(ship_mask, dtype=bool)
+
+
+def background_of(ds, mask, ship_mask):
+    """Mean and std of the enhancement image of ds (as used by plume_mask_of) outside the plume and ship masks."""
+    enh_var = "no2_enhancement_interp" if "no2_enhancement_interp" in ds else "no2_enhancement_c_back"
+    outside = ~(np.asarray(mask, dtype=bool) | np.asarray(ship_mask, dtype=bool))
+    pixels = ds[enh_var].values[outside]
+    if not np.isfinite(pixels).any():
+        return np.nan, np.nan
+    return float(np.nanmean(pixels)), float(np.nanstd(pixels))
+
+
+def subtract_background(ds, mask, ship_mask, min_background_fraction=0.3):
+    """Correct the enhancement image of ds (as used by plume_mask_of) for the background left in it.
+
+    The background is the mean of the image outside the plume and ship masks. A warning is
+    raised if it is larger than its std (the reference does not match the background of the
+    plume window). The mean is subtracted from the image, and the vertical integral is
+    recomputed, only if at least min_background_fraction of the pixels lie outside plume and
+    ship; otherwise the image stays as it is.
+
+    The uncorrected image and integral are kept as <name>_uncorrected; attrs background_mean,
+    background_std, background_fraction and background_corrected (1/0) record the correction.
+    """
+    enh_var = "no2_enhancement_interp" if "no2_enhancement_interp" in ds else "no2_enhancement_c_back"
+    int_var = "vertically_integrated_" + enh_var
+    outside = ~(np.asarray(mask, dtype=bool) | np.asarray(ship_mask, dtype=bool))
+    fraction = float(outside.mean())
+    mean, std = background_of(ds, mask, ship_mask)
+    ds.attrs.update(background_mean=mean, background_std=std, background_fraction=fraction, background_corrected=0)
+    if mean > std:
+        warnings.warn(f"MMSI {ds.attrs.get('mmsi')} at {ds.attrs.get('t')}: background mean {mean:.2e} > std {std:.2e} "
+                      f"outside plume and ship mask ({fraction:.0%} of the pixels)")
+    if fraction < min_background_fraction or not np.isfinite(mean):
+        return ds
+    ds[enh_var + "_uncorrected"] = ds[enh_var].copy()
+    ds[enh_var] = ds[enh_var] - mean
+    if int_var in ds:
+        ds[int_var + "_uncorrected"] = ds[int_var].copy()
+        ds[int_var] = ds[enh_var].sum(dim="image_row")
+    ds.attrs["background_corrected"] = 1
+    return ds
 
 
 def reference_hits_plume(ds, mask):
@@ -675,16 +757,18 @@ def detect_plume_ztest_left(
 import matplotlib.pyplot as plt
 
 def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_ship=0.3,
-                time_tolerance_seconds=50, plume_rows=(8, 20), ship_rows=(4, 10)):
+                time_tolerance_seconds=50, plume_rows=(8, 20), ship_rows=(4, 10),
+                plume_min_cluster_size=20, ship_min_cluster_size=20):
     """Flags whether a plume or, if not, the ship itself is found close to the pass time.
 
     The plume is searched in image rows plume_rows[0]:plume_rows[1], the ship in
-    ship_rows[0]:ship_rows[1], both within +-time_tolerance_seconds of the pass time.
+    ship_rows[0]:ship_rows[1], both within +-time_tolerance_seconds of the pass time, as
+    clusters of at least plume_min_cluster_size / ship_min_cluster_size pixels.
     Rows are the original IMPACT viewing direction numbers (image_row coordinate), so they
     keep pointing at the same elevations when the lowest viewing directions are dropped.
     Sets ds_plume.attrs["plume_or_ship_found"] to "True"/"False".
     """
-    from SEICOR.plotting import set_elevation_yticks  # local: plotting imports enhancements, which imports this module
+    from SEICOR.plotting import set_elevation_yticks, positive_color_limit  # local: plotting imports enhancements, which imports this module
 
     row_labels = np.asarray(ds_plume["image_row"].values)
 
@@ -717,7 +801,8 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
     image_cut_plume = ds_plume[varname].isel(image_row = slice_rows, window_plume = idx).values
     bg_mean_val = ds_plume[varname].mean().values
     bg_std_val = ds_plume[varname].std().values
-    mask = detect_plume_ztest(image_cut_plume, bg_mean = bg_mean_val, bg_std= bg_std_val, p_threshold=p_threshold_plume)
+    mask = detect_plume_ztest(image_cut_plume, bg_mean = bg_mean_val, bg_std= bg_std_val, p_threshold=p_threshold_plume,
+                              min_cluster_size=plume_min_cluster_size)
 
     image_full = ds_plume[varname].values
 
@@ -744,7 +829,7 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
     yedges = np.arange(ny + 1)
 
     mesh = ax.pcolormesh(xedges, yedges, image_full, cmap="bwr", shading="auto",
-                         vmin=-np.nanmax(np.abs(image_full)), vmax=np.nanmax(np.abs(image_full)))
+                         vmin=-positive_color_limit(image_full), vmax=positive_color_limit(image_full))
     fig.colorbar(mesh, ax=ax, label="NO$_2$ enhancement")
 
     # draw boundary around the mask region using mesh centres
@@ -776,7 +861,7 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         win_mask = (times >= (t0 - tol)) & (times <= (t0 + tol))
         idx = np.nonzero(win_mask)[0]
         image_cut_ship = ds_plume[varname].isel(image_row = slice_rows, window_plume = idx).values
-        mask = detect_plume_ztest_left(image_cut_ship, bg_mean = bg_mean_val, bg_std= bg_std_val, p_threshold=p_threshold_ship, min_cluster_size=20)
+        mask = detect_plume_ztest_left(image_cut_ship, bg_mean = bg_mean_val, bg_std= bg_std_val, p_threshold=p_threshold_ship, min_cluster_size=ship_min_cluster_size)
 
         image_full = ds_plume[varname].values
 
@@ -801,7 +886,7 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
         yedges = np.arange(ny + 1)
 
         mesh = ax.pcolormesh(xedges, yedges, image_full, cmap="bwr", shading="auto",
-                         vmin=-np.nanmax(np.abs(image_full)), vmax=np.nanmax(np.abs(image_full)))
+                         vmin=-positive_color_limit(image_full), vmax=positive_color_limit(image_full))
         fig.colorbar(mesh, ax=ax, label="NO$_2$ enhancement")
 
         xcent = (xedges[:-1] + xedges[1:]) / 2.0

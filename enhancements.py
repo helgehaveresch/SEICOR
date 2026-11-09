@@ -28,27 +28,51 @@ def rolling_background_enh(ds, window_size=500):
     ds["O4_rolling_background"] = ds["a[O4]"].rolling(dim_0=window_size).mean()
     return ds
 
+def _detrend_rows(image, seconds):
+    """image (row, time) minus the least-squares linear trend in time of each row (NaN ignored)."""
+    image = np.asarray(image, dtype=float)
+    x = np.broadcast_to(np.asarray(seconds, dtype=float), image.shape)
+    valid = np.isfinite(image)
+    n = valid.sum(axis=1, keepdims=True)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        x_mean = np.where(valid, x, 0.0).sum(axis=1, keepdims=True) / n
+        y_mean = np.where(valid, image, 0.0).sum(axis=1, keepdims=True) / n
+        dx = np.where(valid, x - x_mean, 0.0)
+        slope = (dx * np.where(valid, image - y_mean, 0.0)).sum(axis=1, keepdims=True) / (dx ** 2).sum(axis=1, keepdims=True)
+    slope = np.nan_to_num(slope)  # rows with a single value: no trend
+    return image - y_mean - slope * (x - x_mean)
+
+
 def find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, direction="up",
                           start_offset=3, ref_search_minutes=60, ref_window_minutes=1,
                           ref_min_span_seconds=40, ref_min_count=100, other_ship_minutes=5,
-                          ztest_p_threshold=0.15, ztest_min_cluster_size=20):
+                          ztest_p_threshold=0.15, ztest_min_cluster_size=20, other_ship_min_length_m=None):
     """Searches a clean reference window of `ref_window_minutes` before (direction="up") or
     after (direction="down") the ship pass at `t`, stepping 30 s per rejected try from `start_offset`
     up to `ref_search_minutes`. `start_offset` is the distance of the window start from `t`
     (direction="up": the window ends `ref_window_minutes` later, i.e. closer to `t`).
 
-    A window is accepted if no other ship pass lies within `other_ship_minutes` of it, all its
+    A window is accepted if no other ship pass lies within `other_ship_minutes` of it (only ships
+    longer than `other_ship_min_length_m` count if it is given; ships of unknown length always count;
+    other_ship_minutes None or 0 switches this check off), all its
     measurements have the viewing azimuth of the pass, it holds at least `ref_min_count`
-    measurements covering at least `ref_min_span_seconds`, and the z-test finds no plume in it.
+    measurements covering at least `ref_min_span_seconds`, and the z-test finds no plume in it
+    (tested on the dSCDs minus the linear trend of each row, so that drifts do not count as plume).
 
     Returns (window_ref, ref_start, ref_end) with window_ref a boolean mask over measurement_times,
     or None if no clean window was found.
     """
-    other_times = pd.DatetimeIndex(pd.to_datetime(ship_passes.index[ship_passes["MMSI"] != mmsi]))
+    other = ship_passes["MMSI"] != mmsi
+    if other_ship_min_length_m is not None and "Length_in_m" in ship_passes:
+        length = pd.to_numeric(ship_passes["Length_in_m"], errors="coerce")
+        other &= ~(length <= other_ship_min_length_m)  # unknown length (NaN) still counts
+    other_times = pd.DatetimeIndex(pd.to_datetime(ship_passes.index[other]))
     if other_times.tz is None:
         other_times = other_times.tz_localize("UTC")
     other_times = other_times.tz_convert("UTC").values
-    min_separation = np.timedelta64(int(other_ship_minutes * 60), "s")
+    if not other_ship_minutes:  # check switched off
+        other_times = other_times[:0]
+    min_separation = np.timedelta64(int((other_ship_minutes or 0) * 60), "s")
     azimuths = _azimuths(ds_impact)
     az_pass = _azimuth_at(ds_impact, measurement_times, t)
 
@@ -77,9 +101,11 @@ def find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, di
         span_seconds = (ref_times.max() - ref_times.min()).total_seconds()
         if n_ref < ref_min_count or span_seconds < float(ref_min_span_seconds):
             continue
-        # make sure there is no plume in the reference window
-        no2_ref = ds_impact["a[NO2]"].isel(dim_0=window_ref)
-        mask = SEICOR.plumes.detect_plume_ztest((no2_ref - no2_ref.mean(dim="dim_0")).values,
+        # make sure there is no plume in the reference window: z-test on the dSCDs minus the linear
+        # trend of each row, so that a smoothly rising or falling background is not taken for a plume
+        no2_ref = ds_impact["a[NO2]"].isel(dim_0=window_ref).transpose("viewing_direction", "dim_0").values
+        seconds = (ref_times - ref_times[0]).total_seconds().to_numpy()
+        mask = SEICOR.plumes.detect_plume_ztest(_detrend_rows(no2_ref, seconds),
                                                 p_threshold=ztest_p_threshold, min_cluster_size=ztest_min_cluster_size)
         if mask.sum() == 0:
             return window_ref, ref_start, ref_end
@@ -90,7 +116,8 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
                                     ref_window_minutes=1, ref_min_span_seconds=40,
                                     ref_min_count=100, do_lp=False, df_lp_310=None, df_lp_365=None,
                                     ref_start_offset=3, other_ship_minutes=5,
-                                    ref_ztest_p_threshold=0.15, ref_ztest_min_cluster_size=20):
+                                    ref_ztest_p_threshold=0.15, ref_ztest_min_cluster_size=20,
+                                    other_ship_min_length_m=None):
     """Subtracts background for a single ship pass (row from ship_passes).
 
     This variant enforces minimum quality for the chosen reference window: it must
@@ -115,6 +142,7 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
                                    ref_window_minutes=ref_window_minutes,
                                    ref_min_span_seconds=ref_min_span_seconds, ref_min_count=ref_min_count,
                                    other_ship_minutes=other_ship_minutes,
+                                   other_ship_min_length_m=other_ship_min_length_m,
                                    ztest_p_threshold=ref_ztest_p_threshold,
                                    ztest_min_cluster_size=ref_ztest_min_cluster_size)
     if upwind is None:
@@ -249,7 +277,8 @@ def upwind_downwind_interp_background_enh(ds, row,
                                           ref_search_minutes=60, ref_window_minutes=1, 
                                           ref_min_span_seconds=40, ref_min_count=100,
                                           ref_start_offset=3, other_ship_minutes=5,
-                                          ref_ztest_p_threshold=0.15, ref_ztest_min_cluster_size=20):
+                                          ref_ztest_p_threshold=0.15, ref_ztest_min_cluster_size=20,
+                                          other_ship_min_length_m=None):
     """
     Subtracts a background interpolated in time between an upwind and a downwind reference
     window for a single ship pass (row from ship_passes).
@@ -270,7 +299,8 @@ def upwind_downwind_interp_background_enh(ds, row,
     window = ((measurement_times >= t - pd.Timedelta(minutes=window_minutes[0])) & (measurement_times < t + pd.Timedelta(minutes=window_minutes[1])))
     search_kwargs = dict(ref_search_minutes=ref_search_minutes, ref_window_minutes=ref_window_minutes,
                          ref_min_span_seconds=ref_min_span_seconds, ref_min_count=ref_min_count,
-                         other_ship_minutes=other_ship_minutes, ztest_p_threshold=ref_ztest_p_threshold,
+                         other_ship_minutes=other_ship_minutes, other_ship_min_length_m=other_ship_min_length_m,
+                         ztest_p_threshold=ref_ztest_p_threshold,
                          ztest_min_cluster_size=ref_ztest_min_cluster_size)
 
     if ds is None:
@@ -402,9 +432,11 @@ def build_plume_ds(row, window_minutes, ds_impact, measurement_times, ship_passe
     background enhancements. The references are searched outside the plume window, with
     reference_search_kwargs passed to both enhancement functions.
 
-    The upwind DOAS fit only runs if nlin_param_file is given. Returns None if there is no
+    The upwind DOAS fit only runs if nlin_param_file is given; it is coarsened to the same time
+    bins as ds_impact (attr coarsen_time_resolution_seconds). Returns None if there is no
     measurement or upwind reference.
     """
+    time_resolution = ds_impact.attrs.get("coarsen_time_resolution_seconds")
     ds = upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passes, window_minutes=window_minutes,
                                         df_lp_310=df_lp_310, df_lp_365=df_lp_365, **reference_search_kwargs)
     if ds is None:
@@ -412,11 +444,14 @@ def build_plume_ds(row, window_minutes, ds_impact, measurement_times, ship_passe
     ds = SEICOR.plumes.add_ship_trajectory_to_plume_ds(ds, filtered_ship_groups)
     ds = SEICOR.plumes.add_insitu_to_plume_ds(ds, df_insitu)
     if nlin_param_file is not None:
-        ds = SEICOR.impact.call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds, row, nlin_param_file, impact_path)
+        ds = SEICOR.impact.call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds, row, nlin_param_file, impact_path,
+                                                                           time_resolution)
     ds = upwind_downwind_interp_background_enh(ds, row, ds_impact, measurement_times, ship_passes,
                                                window_minutes=window_minutes, **reference_search_kwargs)
     ds.attrs["window_before_minutes"] = window_minutes[0]
     ds.attrs["window_after_minutes"] = window_minutes[1]
+    if time_resolution:
+        ds.attrs["impact_time_resolution_seconds"] = time_resolution
     return ds
 
 def polynomial_background_enh(ds_impact_masked, degree=8):

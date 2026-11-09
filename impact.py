@@ -2,8 +2,9 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import subprocess
-import sys 
+import sys
 import os
+import copy
 sys.path.append(r"C:\Users\hhave\Documents\Promotion\scripts")
 from doas_tools.file_handling import read_SC_file_imaging
 from imaging_tools.process_SC import mask_zenith
@@ -45,18 +46,94 @@ def rolling_impact(ds, window):
     ds["O4_rolling"] = ds["a[O4]"].rolling(dim_0=window).mean()
     return ds
 
-def coarsen_impact_measurements(ds, factor):
-    """
-    Coarsens the IMPACT measurements by a specified factor.
+def _measurement_times(ds):
+    """Time of each measurement (dim_0), also if datetime was broadcast over viewing_direction."""
+    times = ds["datetime"]
+    if "viewing_direction" in times.dims:
+        times = times.max(dim="viewing_direction")  # skips NaT of masked viewing directions
+    return times.values
 
-    Args:
-        ds (xr.Dataset): The IMPACT dataset to coarsen.
-        factor (int): The factor by which to coarsen the dataset.
 
-    Returns:
-        xr.Dataset: The coarsened IMPACT dataset.
+def coarsen_impact_measurements(ds, time_resolution_seconds):
+    """Average the IMPACT measurements (dim_0) in fixed time bins of time_resolution_seconds.
+
+    The bins are aligned to midnight UTC of the first measurement, so other datasets of the same
+    day (e.g. the upwind DOAS fit) get the same bins. All measurements in a bin are averaged
+    ignoring NaN, the fit errors sig[...] are propagated as sqrt(sum sig^2) / n, and datetime is
+    the bin centre, i.e. a regular time grid. Bins without measurements are dropped, so gaps stay
+    gaps. dim_0 keeps the index of the first raw measurement in each bin.
+
+    attrs: coarsen_time_resolution_seconds, and coarsen_factor = bin length / median raw time
+    step (about the number of raw measurements per bin), used to scale settings that count
+    measurements or pixels. Returns ds unchanged if time_resolution_seconds is None or 0.
     """
-    return ds.coarsen(dim_0=factor, boundary="trim").mean()
+    if not time_resolution_seconds:
+        return ds
+    times = _measurement_times(ds).astype("datetime64[ns]")
+    if np.any(np.diff(times) < np.timedelta64(0, "ns")):
+        order = np.argsort(times, kind="stable")
+        ds, times = ds.isel(dim_0=order), times[order]
+    res_ns = int(round(time_resolution_seconds * 1e9))
+    t_ns = times.astype(np.int64)
+    day0_ns = times[0].astype("datetime64[D]").astype("datetime64[ns]").astype(np.int64)
+    bins = (t_ns - day0_ns) // res_ns
+    starts = np.flatnonzero(np.r_[True, bins[1:] != bins[:-1]])  # first raw measurement of each bin
+    centres = (day0_ns + bins[starts] * res_ns + res_ns // 2).astype("datetime64[ns]")
+
+    out = ds.isel(dim_0=starts)  # coordinates and variables without dim_0
+    with np.errstate(invalid="ignore", divide="ignore"):  # all-NaN bins give NaN
+        for name, var in ds.data_vars.items():
+            if "dim_0" not in var.dims:
+                continue
+            dims = [d for d in var.dims if d != "dim_0"] + ["dim_0"]
+            if np.issubdtype(var.dtype, np.datetime64):
+                reduced = np.broadcast_to(centres, [var.sizes[d] for d in dims[:-1]] + [len(starts)]).copy()
+            else:
+                values = var.transpose(*dims).values.astype(float)
+                valid = np.isfinite(values)
+                count = np.add.reduceat(valid, starts, axis=-1)
+                if name.startswith("sig["):
+                    reduced = np.sqrt(np.add.reduceat(np.where(valid, values ** 2, 0.0), starts, axis=-1)) / count
+                else:
+                    reduced = np.add.reduceat(np.where(valid, values, 0.0), starts, axis=-1) / count
+            out[name] = (dims, reduced, var.attrs)
+            out[name] = out[name].transpose(*var.dims)
+    out.attrs["coarsen_time_resolution_seconds"] = float(time_resolution_seconds)
+    out.attrs["coarsen_factor"] = float(time_resolution_seconds / (np.median(np.diff(t_ns)) / 1e9))
+    return out
+
+
+# settings that count raw measurements or image pixels, as (section, key) of the processing settings;
+# with coarsened IMPACT data, scale_sample_counts divides them by the coarsening factor
+SAMPLE_COUNT_SETTINGS = [
+    ("quality", "rolling_mean_window"),
+    ("enhancement", "rolling_background_window"),
+    ("reference_search", "min_count"),
+    ("reference_search", "ztest_min_cluster_size"),
+    ("detection", "plume_min_cluster_size"),
+    ("detection", "ship_min_cluster_size"),
+    ("plume_mask", "merge_min_cluster_size"),
+    ("plume_mask", "merge_max_cluster_size"),
+    ("plume_mask", "ship_min_cluster_size"),
+    ("plume_mask", "stop_pixels"),
+]
+
+
+def scale_count(count, factor):
+    """A number of raw measurements/pixels expressed in coarsened ones (at least 1; None stays None)."""
+    if count is None:
+        return None
+    return max(1, int(round(count / factor)))
+
+
+def scale_sample_counts(processing_settings, factor):
+    """Copy of the processing settings with the SAMPLE_COUNT_SETTINGS divided by factor, so they keep
+    their meaning in raw measurements when the IMPACT data is coarsened by factor."""
+    scaled = copy.deepcopy(processing_settings)
+    for section, key in SAMPLE_COUNT_SETTINGS:
+        if key in scaled.get(section, {}):
+            scaled[section][key] = scale_count(scaled[section][key], factor)
+    return scaled
 
 def rms_mask(ds, threshold=0.01, instrument = "IMPACT"):
     if instrument == "IMPACT":
@@ -116,19 +193,22 @@ def _to_decimal_hours(ts):
             + ts.microsecond / 3_600_000_000.0
         )
 
-def add_offaxis_ref_fit_to_plume_ds(ds_plume, IMPACT_path, SC_file_name):
+def add_offaxis_ref_fit_to_plume_ds(ds_plume, IMPACT_path, SC_file_name, coarsen_time_resolution_seconds=None):
     """
     Add off-axis reference fit information to the plume dataset.
 
     Args:
         ds_plume (xr.Dataset): The plume dataset.
         SC_file_name (str): The path to the off-axis reference fit dataset.
+        coarsen_time_resolution_seconds: time bins of the IMPACT data the plume dataset was made
+            from (None = not coarsened); the fit is coarsened the same way before it is matched in time.
     """
     date = pd.to_datetime(ds_plume["times_plume"].values)[0].strftime("%y%m%d")
     ds_off = read_SC_file_imaging(IMPACT_path, date, mode= SC_file_name)
     ds_off = mask_zenith(ds_off)
     # same viewing directions as the plume (the lowest ones may have been dropped)
     ds_off = ds_off.sel(viewing_direction=ds_plume["image_row"].values)
+    ds_off = coarsen_impact_measurements(ds_off, coarsen_time_resolution_seconds)
 
     # small tolerance for edge matching
     t_tol = pd.Timedelta(milliseconds=1)
@@ -199,7 +279,8 @@ def add_offaxis_ref_fit_to_plume_ds(ds_plume, IMPACT_path, SC_file_name):
     return ds_plume
 
 
-def call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds_plume, ship_pass_single, param_file, IMPACT_path):
+def call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds_plume, ship_pass_single, param_file, IMPACT_path,
+                                                    coarsen_time_resolution_seconds=None):
     """
     Calls the nlin-c plume retrieval for each ship pass and saves the resulting plume datasets.
     """
@@ -243,7 +324,8 @@ def call_nlin_c_for_offaxis_ref_and_add_to_plume_ds(ds_plume, ship_pass_single, 
         print(f"Running nlin_c.exe on: {param_file_modified}")
         subprocess.run([r"P:\exe_64\nlin_c.exe", param_file_modified])
         SC_file_ending = "ID.NO2_VIS_upwind_" + plume_name_str
-        ds_plume = add_offaxis_ref_fit_to_plume_ds(ds_plume, IMPACT_path, SC_file_name=SC_file_ending)
+        ds_plume = add_offaxis_ref_fit_to_plume_ds(ds_plume, IMPACT_path, SC_file_name=SC_file_ending,
+                                                   coarsen_time_resolution_seconds=coarsen_time_resolution_seconds)
 
     finally:
         try:
