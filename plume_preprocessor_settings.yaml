@@ -114,10 +114,10 @@ processing:
     min_background_fraction: 0.3 # after masking, the mean of the enhancement image outside plume and ship is subtracted (warning if mean > std) if at least this fraction of the pixels lies outside plume and ship
 
 Output:
-  plots_out_dir: "analysis_test"
-  img_out_dir: "video_test"
-  ship_passes_out_dir: "ship_passes_test"
-  plume_out_dir: "plumes_test"
+  plots_out_dir: "analysis"
+  img_out_dir: "video"
+  ship_passes_out_dir: "ship_passes"
+  plume_out_dir: "plumes"
   impact_coarsened_out_dir: "IMPACT_coarsened" # IMPACT_<date>_<time_resolution>s.nc, only written if coarsened
 
 Plotting:
