@@ -27,6 +27,8 @@ def run_for_date(date):
             text=True
         )
         print(cp.stdout or f"Finished plume_preprocessor for date: {date} (rc={cp.returncode})")
+        if cp.returncode == 0 and "SKIPPED:" in (cp.stdout or ""):
+            return date, "skipped"
         return date, cp.returncode
     except Exception as e:
         print(f"Error running date {date}: {e}")
@@ -41,7 +43,10 @@ if __name__ == '__main__':
             pool.terminate()
             raise
 
-    failed = [d for d, rc in results if rc != 0]
+    skipped = [d for d, rc in results if rc == "skipped"]
+    if skipped:
+        print(f"Skipped {len(skipped)} dates without SD measurements:", skipped)
+    failed = [d for d, rc in results if rc not in (0, "skipped")]
     if failed:
         print("The following dates failed:", failed)
         raise SystemExit(1)

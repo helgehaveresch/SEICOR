@@ -24,7 +24,7 @@ SETTINGS_PATH = Path("PLUME_SETTINGS_PATH", _default_settings_path)
 import numpy as np
 sys.path.append(str(SCRIPTS_DIR))
 from doas_tools.file_handling import read_SC_file_imaging
-from imaging_tools.process_SC import mask_zenith, correct_destriped_for_noon_reference
+from imaging_tools.process_SC import mask_zenith, mask_short_azimuth_blocks, correct_destriped_for_noon_reference
 from imaging_tools.utilities import get_month_folder
 import SEICOR.ais
 import SEICOR.in_situ
@@ -67,6 +67,17 @@ plumes_out_dir          = (BASEPATH / settings["Output"]["plume_out_dir"] / f"pl
 ship_passes_out_dir     = (BASEPATH / settings["Output"]["ship_passes_out_dir"])
 out_dir                 = (BASEPATH / settings["Output"]["plots_out_dir"])
 impact_out_dir          = (BASEPATH / settings["Output"]["impact_coarsened_out_dir"])
+#%% Skip days without SD measurements
+# a day is only processed if the SD scans were measured: the SD file of the first viewing direction
+# must exist and contain at least one measurement
+sd_file = IMPACT_path / f"{date}01{instrument_settings.get('required_SD_file_ending', 'SD.NO2_VIS_daily_ref')}"
+n_sd = 0
+if sd_file.exists():
+    with open(sd_file, errors="ignore") as f:
+        n_sd = sum(1 for line in f if line.strip()[:1].isdigit())
+if n_sd == 0:
+    print(f"SKIPPED: no SD measurements on {date} ({sd_file.name} {'is empty' if sd_file.exists() else 'does not exist'})")
+    sys.exit(0)
 #%% Initialize IMPACT measurements
 print("Starting plume preprocessing...")
 ds_impact = read_SC_file_imaging(IMPACT_path, date, IMPACT_SC_file_ending)
@@ -74,6 +85,8 @@ if do_ref_correction:
     ds_ref_corr = read_SC_file_imaging(IMPACT_path, date, SC_ref_offset_corr)
     ds_impact = correct_destriped_for_noon_reference(ds_impact, ds_ref_corr)
 ds_impact = mask_zenith(ds_impact)
+# zenith measurements labelled as off-axis: short blocks at another viewing azimuth
+ds_impact = mask_short_azimuth_blocks(ds_impact, max_minutes=instrument_settings.get("zenith_block_max_minutes", 5))
 # drop the lowest viewing directions (index 0 = lowest VEA); the viewing_direction coordinate keeps the
 # original numbers, so image_row in the plume files and the row settings still refer to the same elevations
 ds_impact = ds_impact.isel(viewing_direction=slice(instrument_settings.get("drop_lowest_viewing_directions", 0), None))
@@ -223,6 +236,9 @@ def detect_plume(ds_plume):
         ship_rows=tuple(detection_settings["ship_rows"]),
         plume_min_cluster_size=detection_settings["plume_min_cluster_size"],
         ship_min_cluster_size=detection_settings["ship_min_cluster_size"],
+        # the plume is searched in the same time window as the source region of the plume mask
+        plume_seconds_before=plume_mask_settings.get("source_seconds_before", 60),
+        plume_seconds_after=plume_mask_settings.get("source_seconds_after", 60),
     )
 
 

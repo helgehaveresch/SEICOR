@@ -767,12 +767,16 @@ import matplotlib.pyplot as plt
 
 def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_ship=0.3,
                 time_tolerance_seconds=50, plume_rows=(8, 20), ship_rows=(4, 10),
-                plume_min_cluster_size=20, ship_min_cluster_size=20):
+                plume_min_cluster_size=20, ship_min_cluster_size=20,
+                plume_seconds_before=None, plume_seconds_after=None):
     """Flags whether a plume or, if not, the ship itself is found close to the pass time.
 
     The plume is searched in image rows plume_rows[0]:plume_rows[1], the ship in
-    ship_rows[0]:ship_rows[1], both within +-time_tolerance_seconds of the pass time, as
-    clusters of at least plume_min_cluster_size / ship_min_cluster_size pixels.
+    ship_rows[0]:ship_rows[1], as clusters of at least plume_min_cluster_size /
+    ship_min_cluster_size pixels. The plume is searched from plume_seconds_before before to
+    plume_seconds_after after the pass time (the source region of the plume mask; None:
+    time_tolerance_seconds), the ship within +-time_tolerance_seconds.
+    The background level of the z-test is the median of the enhancement image (robust to the plume).
     Rows are the original IMPACT viewing direction numbers (image_row coordinate), so they
     keep pointing at the same elevations when the lowest viewing directions are dropped.
     Sets ds_plume.attrs["plume_or_ship_found"] to "True"/"False".
@@ -802,13 +806,14 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
             pass
 
     slice_rows = _row_positions(plume_rows)
-    tol = pd.Timedelta(seconds=time_tolerance_seconds)
+    before = pd.Timedelta(seconds=time_tolerance_seconds if plume_seconds_before is None else plume_seconds_before)
+    after = pd.Timedelta(seconds=time_tolerance_seconds if plume_seconds_after is None else plume_seconds_after)
     times = pd.to_datetime(ds_plume["times_plume"].values, utc=True)
     t0 = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
-    win_mask = (times >= (t0 - tol)) & (times <= (t0 + tol))
+    win_mask = (times >= (t0 - before)) & (times <= (t0 + after))
     idx = np.nonzero(win_mask)[0]
     image_cut_plume = ds_plume[varname].isel(image_row = slice_rows, window_plume = idx).values
-    bg_mean_val = ds_plume[varname].mean().values
+    bg_mean_val = float(np.nanmedian(ds_plume[varname].values))  # median: robust to the plume itself
     bg_std_val = ds_plume[varname].std().values
     mask = detect_plume_ztest(image_cut_plume, bg_mean = bg_mean_val, bg_std= bg_std_val, p_threshold=p_threshold_plume,
                               min_cluster_size=plume_min_cluster_size)
