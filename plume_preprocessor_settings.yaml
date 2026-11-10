@@ -86,10 +86,10 @@ processing:
     ztest_min_cluster_size: 60
 
   detection: # plume / ship flag (plumes.sort_plumes)
-    p_threshold_plume: 0.02
-    p_threshold_ship: 0.02
+    p_threshold_plume: 0.03
+    p_threshold_ship: 0.03
     time_tolerance_seconds: 60 # searched within +- this time around the pass
-    plume_rows: [8, 20] # image rows (VEA) searched for the plume, python slice [start, stop)
+    plume_rows: [7, 20] # image rows (VEA) searched for the plume, python slice [start, stop)
     ship_rows: [4, 10] # image rows searched for the ship itself
     plume_min_cluster_size: 5 # minimum plume cluster size in pixels (raw measurements)
     ship_min_cluster_size: 20 # minimum ship cluster size in pixels (raw measurements)
@@ -104,7 +104,10 @@ processing:
     merge_min_cluster_size: 70 # only clusters with at least this many pixels are merged
     merge_max_cluster_size: 200 # only clusters with at most this many pixels are merged, whether source-connected or neighbouring; null means no limit
     merge_max_extension_minutes: 5 # merged clusters reach at most this far before or after the source-connected cluster; null means no limit
-    require_connection: true
+    require_connection: true # the plume cluster must touch the source region below (else the mask is empty)
+    source_seconds_before: 60 # source region: from this long before the pass ...
+    source_seconds_after: 100 # ... to this long after it ...
+    source_rows: [8, 18] # ... on these image rows (original viewing direction numbers, inclusive; 8-18 = VEA ~3.5-12 deg)
     ship_p_threshold: 0.05 # left-sided test for the ship (negative dSCDs), as p_threshold_ship in detection
     ship_min_cluster_size: 20 # as in the ship detection of sort_plumes
     max_iter: 10 # first iteration uses the reference statistics, the following ones the re-estimated background

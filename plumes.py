@@ -194,7 +194,8 @@ def _detect_plume_ztest_core(
     # new options for source-connection checking
     require_connection=False,
     ds_plume=None,
-    time_tol_seconds=60,
+    time_tol_seconds=60,  # source region starts this long before the pass
+    time_after_seconds=None,  # ... and ends this long after it (None: time_tol_seconds)
     viewdir_min=8,
     viewdir_max=18,
     keep_second_largest=False,
@@ -274,7 +275,9 @@ def _detect_plume_ztest_core(
         t0_dt = pd.to_datetime(ds_plume.attrs.get("t"), utc=True)
 
         # 1D boolean masks
-        time_ok_1d = np.abs(times_1d - t0_dt) <= pd.Timedelta(seconds=time_tol_seconds)
+        after_s = time_tol_seconds if time_after_seconds is None else time_after_seconds
+        time_ok_1d = ((times_1d >= t0_dt - pd.Timedelta(seconds=time_tol_seconds))
+                      & (times_1d <= t0_dt + pd.Timedelta(seconds=after_s)))
         vd_1d = np.asarray(ds_plume.image_row)
         view_ok_1d = (vd_1d >= viewdir_min) & (vd_1d <= viewdir_max)
 
@@ -427,7 +430,8 @@ def detect_plume_ztest_iterative(
     # new options for source-connection checking
     require_connection=False,
     ds_plume=None,
-    time_tol_seconds=60,
+    time_tol_seconds=60,  # source region starts this long before the pass
+    time_after_seconds=None,  # ... and ends this long after it (None: time_tol_seconds)
     viewdir_min=8,
     viewdir_max=18,
     # option to keep second largest cluster
@@ -549,6 +553,7 @@ def detect_plume_ztest_iterative(
             require_connection=require_connection,
             ds_plume=ds_plume,
             time_tol_seconds=time_tol_seconds,
+            time_after_seconds=time_after_seconds,
             viewdir_min=viewdir_min,
             viewdir_max=viewdir_max,
             keep_second_largest=keep_second_largest,
@@ -599,6 +604,10 @@ def plume_mask_of(ds, plume_mask_settings):
         kernel_arm=plume_mask_settings["kernel_arm"],
         require_connection=plume_mask_settings["require_connection"],
         ds_plume=ds,
+        time_tol_seconds=plume_mask_settings.get("source_seconds_before", 60),
+        time_after_seconds=plume_mask_settings.get("source_seconds_after", 60),
+        viewdir_min=plume_mask_settings.get("source_rows", [8, 18])[0],
+        viewdir_max=plume_mask_settings.get("source_rows", [8, 18])[1],
         keep_second_largest=False,
         second_size_threshold=100,
         ship_p_threshold=plume_mask_settings["ship_p_threshold"],
