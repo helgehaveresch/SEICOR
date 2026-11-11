@@ -9,6 +9,65 @@ sys.path.append(r"C:\Users\hhave\Documents\Promotion\scripts")
 from doas_tools.file_handling import read_SC_file_imaging
 from imaging_tools.process_SC import mask_zenith
 
+def read_reference_intervals(log_file, max_minutes=5):
+    """Time intervals (UT) of the reference ("zenith") measurements from an IMPACT _D.LOG file.
+
+    The log lists every telescope move ("New telescope position: <elevation> elevation, <azimuth>
+    azimuth") and the measurement programme (MULTIAXIS_PROGRAMMED_n = <elevation> <azimuth> <S|_> ...,
+    S = scan). Every position whose elevation is not a scan elevation is a reference measurement
+    (90/85.5 deg, 80 deg on 2026-05-17..29, 70 deg, test scans); it lasts until the next telescope
+    move, at most max_minutes. The labels of these measurements in the spectra are not reliable
+    (2026-05-17..29 they are labelled as off-axis), so they are taken from the log.
+    Returns a DataFrame with columns start, end, elevation, azimuth (empty if nothing is found).
+    """
+    import re
+    move = re.compile(r"^(\d\d)\.(\d\d)\.(\d{4}) (\d\d):(\d\d):(\d\d):(\d\d) New telescope position: "
+                      r"([-\d.]+) elevation, ([-\d.]+) azimuth")
+    programme = re.compile(r"^MULTIAXIS_PROGRAMMED_\d+ = +([-\d.]+) +([-\d.]+) +(\S)")
+    moves, scan_elevations = [], set()
+    with open(log_file, encoding="latin-1") as f:
+        for line in f:
+            m = move.match(line)
+            if m:
+                d, mo, y, hh, mm, ss, cc, elev, az = m.groups()
+                t = pd.Timestamp(int(y), int(mo), int(d), int(hh), int(mm), int(ss), int(cc) * 10000)
+                moves.append((t, float(elev), float(az)))
+                continue
+            m = programme.match(line)
+            if m and m.group(3) == "S":
+                scan_elevations.add(round(float(m.group(1)), 1))
+    columns = ["start", "end", "elevation", "azimuth"]
+    if not moves or not scan_elevations:
+        return pd.DataFrame(columns=columns)
+    max_duration = pd.Timedelta(minutes=max_minutes)
+    rows = []
+    for i, (t, elev, az) in enumerate(moves):
+        if round(elev, 1) in scan_elevations:
+            continue
+        end = t + max_duration
+        if i + 1 < len(moves):
+            end = min(end, moves[i + 1][0])
+        rows.append((t, end, elev, az))
+    return pd.DataFrame(rows, columns=columns)
+
+
+def mask_reference_measurements(ds, log_file, max_minutes=5, time_var="datetime"):
+    """Drop the measurements taken during the reference ("zenith") measurements listed in log_file
+    (see read_reference_intervals). Returns (ds without these measurements, the intervals)."""
+    intervals = read_reference_intervals(log_file, max_minutes=max_minutes)
+    if intervals.empty:
+        return ds, intervals
+    times_da = ds[time_var]
+    if "viewing_direction" in times_da.dims:  # after mask_zenith the time variables carry viewing_direction
+        times_da = times_da.max("viewing_direction")
+    dim = times_da.dims[0]
+    times = pd.to_datetime(times_da.values)
+    drop = np.zeros(len(times), dtype=bool)
+    for start, end in zip(intervals["start"], intervals["end"]):
+        drop |= (times >= start) & (times < end)
+    return ds.isel({dim: ~drop}), intervals
+
+
 def calculate_LOS(ds_impact, instrument_location, line_length=0.05):
     """
     Calculate the line of sight (LOS) endpoints based on the instrument location and viewing direction.

@@ -8,12 +8,16 @@ bredom_paths: # the corrected LIDAR file (lidar_file) is read from here
   windows: "Q:\\BREDOM\\SEICOR"
   linux: "/misc/dodecagon/BREDOM/SEICOR"
 
+IMPACT_log_paths: # IMPACT measurement logs (<month folder>/<date>_D.LOG): times of the reference ("zenith") measurements
+  windows: null
+  linux: "/misc/tetraeder/imaging/IMPACT/SEICOR/org"
+
 Instruments: #relative to base_paths
   IMPACT_SC_path: "IMPACT/SLANT_{yy}" #{yy} is the year of the date (250412 -> SLANT_25), month folder is added automatically using the date
   IMPACT_SC_file_ending: "ID.NO2_VIS_daily_ref"
   required_SD_file_ending: "SD.NO2_VIS_daily_ref" # days without measurements in this file (viewing direction 01) are skipped
   drop_lowest_viewing_directions: 5 # number of lowest viewing directions (VEA -3.0 to 0.2 deg) removed right after reading; row numbers in the settings below stay the original ones
-  zenith_block_max_minutes: 5 # zenith measurements are labelled as off-axis (normal los): every block of constant viewing azimuth shorter than this is dropped right after reading
+  zenith_block_max_minutes: 5 # reference ("zenith") measurements are not reliably labelled: dropped at the telescope moves in the _D.LOG of the day (each lasting at most this long); without a log, every block of constant viewing azimuth shorter than this is dropped
   do_reference_correction: false
   SC_reference_offset_correction_files: "_D.NO2_VIS_fix_ref_250907"
   lp_doas_dir: "Open_Path/SpectralAnalysis/results"

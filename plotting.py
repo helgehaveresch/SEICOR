@@ -61,15 +61,20 @@ def set_elevation_yticks(ax, vea, step=5, fontsize=None, row_offset=0.0):
         ax.tick_params(axis="y", labelsize=fontsize)
 
 
-def positive_color_limit(data):
+MIN_COLOR_LIMIT = 4e15  # the colour scale of the enhancement images covers at least +-this
+
+
+def positive_color_limit(data, min_limit=MIN_COLOR_LIMIT):
     """Limit of the symmetric colour scale (vmin=-limit, vmax=limit) of the bwr enhancement images:
     the highest positive value, so that strongly negative pixels (e.g. the ship) do not stretch the
-    scale; values below -limit saturate. The largest absolute value if nothing is positive."""
+    scale; values below -limit saturate. The largest absolute value if nothing is positive.
+    The limit is at least min_limit, so that images without a plume do not show noise at full colour."""
     data = np.asarray(data, dtype=float)
     if not np.isfinite(data).any():
-        return 0.0
+        return float(min_limit)
     top = np.nanmax(data)
-    return float(top) if top > 0 else float(np.nanmax(np.abs(data)))
+    limit = float(top) if top > 0 else float(np.nanmax(np.abs(data)))
+    return max(limit, float(min_limit))
 
 
 MAX_GAP_SECONDS = 6.0  # measurement gaps longer than this are drawn white in the time-row images

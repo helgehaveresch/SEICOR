@@ -85,8 +85,19 @@ if do_ref_correction:
     ds_ref_corr = read_SC_file_imaging(IMPACT_path, date, SC_ref_offset_corr)
     ds_impact = correct_destriped_for_noon_reference(ds_impact, ds_ref_corr)
 ds_impact = mask_zenith(ds_impact)
-# zenith measurements labelled as off-axis: short blocks at another viewing azimuth
-ds_impact = mask_short_azimuth_blocks(ds_impact, max_minutes=instrument_settings.get("zenith_block_max_minutes", 5))
+# reference ("zenith") measurements are not reliably labelled in the spectra: take their times from the
+# telescope moves in the IMPACT _D.LOG of the day; without a log, drop short blocks at another viewing azimuth
+_log_dir = (settings.get("IMPACT_log_paths") or {}).get(_plat_key)
+IMPACT_log_file = Path(_log_dir) / get_month_folder(date) / f"{date}_D.LOG" if _log_dir else None
+if IMPACT_log_file is not None and IMPACT_log_file.exists():
+    _n_before = ds_impact.sizes["dim_0"]
+    ds_impact, reference_intervals = SEICOR.impact.mask_reference_measurements(
+        ds_impact, IMPACT_log_file, max_minutes=instrument_settings.get("zenith_block_max_minutes", 5))
+    print(f"{len(reference_intervals)} reference measurements in {IMPACT_log_file.name}: "
+          f"{_n_before - ds_impact.sizes['dim_0']} measurements dropped")
+else:
+    print(f"no IMPACT log {IMPACT_log_file}: dropping short viewing-azimuth blocks instead")
+    ds_impact = mask_short_azimuth_blocks(ds_impact, max_minutes=instrument_settings.get("zenith_block_max_minutes", 5))
 # drop the lowest viewing directions (index 0 = lowest VEA); the viewing_direction coordinate keeps the
 # original numbers, so image_row in the plume files and the row settings still refer to the same elevations
 ds_impact = ds_impact.isel(viewing_direction=slice(instrument_settings.get("drop_lowest_viewing_directions", 0), None))
