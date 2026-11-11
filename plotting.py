@@ -61,7 +61,7 @@ def set_elevation_yticks(ax, vea, step=5, fontsize=None, row_offset=0.0):
         ax.tick_params(axis="y", labelsize=fontsize)
 
 
-MIN_COLOR_LIMIT = 4e15  # the colour scale of the enhancement images covers at least +-this
+MIN_COLOR_LIMIT = 4e16  # the colour scale of the enhancement images covers at least +-this
 
 
 def positive_color_limit(data, min_limit=MIN_COLOR_LIMIT):
