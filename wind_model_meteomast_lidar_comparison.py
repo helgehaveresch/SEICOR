@@ -33,7 +33,7 @@ from pathlib import Path
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap
+from matplotlib.colors import BoundaryNorm
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -1666,19 +1666,24 @@ CROSS_PANELS = [("wspd", "wind speed / m/s", False), ("wdir", "wind dir / °", T
 # label, x, y (bias = y - x); keys of the sources below
 CROSS_PAIRS = [("ERA5 − meteomast", "meteomast", "ERA5 @mast"),
                ("meteomast − LIDAR", "LIDAR", "meteomast"),
-               ("ERA5 − LIDAR", "LIDAR", "ERA5 @corridor"),
-               ("ERA5 @corridor − ERA5 @mast", "ERA5 @mast", "ERA5 @corridor, mast height")]
+               ("ERA5 − LIDAR", "LIDAR", "ERA5 @LIDAR"),
+               ("ERA5 @LIDAR − ERA5 @mast", "ERA5 @mast", "ERA5 @LIDAR, mast height")]
 CROSS_STYLES = {"LIDAR": ("#2a78d6", "o"), "meteomast": ("#eb6834", "s"),
-                "ERA5 @corridor": ("#1baf7a", "^"), "ERA5 @mast": ("#eda100", "D")}
+                "ERA5 @LIDAR": ("#1baf7a", "^"), "ERA5 @mast": ("#eda100", "D")}
 PAIR_STYLES = dict(zip([p[0] for p in CROSS_PAIRS], [("#2a78d6", "o"), ("#eb6834", "s"), ("#1baf7a", "^"), ("#eda100", "D")]))
+
+def cross_sources(h_mast, h_lidar):
+    """All sources of the pairwise comparison at one (mast height, LIDAR gate) pair, on cross_times."""
+    return {"meteomast": mast_at_level(cross_mast, h_mast),
+            "LIDAR": lidar_at_level(cross_lidar, h_lidar),
+            "ERA5 @mast": column_at_level(era5_ml_mast, h_mast, cross_times),
+            "ERA5 @LIDAR": column_at_level(era5_ml_corridor, h_lidar, cross_times),
+            "ERA5 @LIDAR, mast height": column_at_level(era5_ml_corridor, h_mast, cross_times)}
+
 
 cross_rows, cross_flip_rows = [], []
 for h_mast, h_lidar in MAST_LIDAR_PAIRS:
-    src = {"meteomast": mast_at_level(cross_mast, h_mast),
-           "LIDAR": lidar_at_level(cross_lidar, h_lidar),
-           "ERA5 @mast": column_at_level(era5_ml_mast, h_mast, cross_times),
-           "ERA5 @corridor": column_at_level(era5_ml_corridor, h_lidar, cross_times),
-           "ERA5 @corridor, mast height": column_at_level(era5_ml_corridor, h_mast, cross_times)}
+    src = cross_sources(h_mast, h_lidar)
     lidar_uncorrected = lidar_at_level(cross_lidar_raw, h_lidar)
     common = np.logical_and.reduce([np.isfinite(df["wspd"].values) for df in src.values()])
     n_common = int(common.sum())
@@ -1698,7 +1703,7 @@ for h_mast, h_lidar in MAST_LIDAR_PAIRS:
     for row, (pair, nx, ny) in enumerate(CROSS_PAIRS):
         dir_ok = (src[nx]["wspd"].values > MIN_SPEED_DIR) & (src[ny]["wspd"].values > MIN_SPEED_DIR)
         hx = h_lidar if nx == "LIDAR" else h_mast
-        hy = h_lidar if ny == "ERA5 @corridor" else h_mast
+        hy = h_lidar if ny == "ERA5 @LIDAR" else h_mast
         for col, (var, label, circular) in enumerate(CROSS_PANELS):
             sel = common & dir_ok if circular else common
             st = scatter_with_fit(axes[row, col], src[nx][var].values[sel], src[ny][var].values[sel],
@@ -1722,7 +1727,7 @@ for h_mast, h_lidar in MAST_LIDAR_PAIRS:
     # all four sources on the common hours
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 7), sharex=True)
     for name, (color, marker) in CROSS_STYLES.items():
-        h_src = h_lidar if name in ("LIDAR", "ERA5 @corridor") else h_mast
+        h_src = h_lidar if name in ("LIDAR", "ERA5 @LIDAR") else h_mast
         for ax, var in ((ax1, "wspd"), (ax2, "wdir")):
             ax.plot(cross_times[common], src[name][var].values[common], linestyle="-" if var == "wspd" else "none",
                     lw=1, marker=marker, ms=3, color=color, label=f"{name} @{h_src} m")
@@ -1735,7 +1740,7 @@ for h_mast, h_lidar in MAST_LIDAR_PAIRS:
     ax2.set_xlabel("time (UTC)")
     ax2.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=20))
     ax2.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax2.xaxis.get_major_locator()))
-    ax1.set_title(f"ERA5, meteomast and LIDAR @{h_mast}/{h_lidar} m (mast/LIDAR), instruments as {CROSS_AVG_WINDOW} means")
+    #ax1.set_title(f"ERA5, meteomast and LIDAR @{h_mast}/{h_lidar} m (mast/LIDAR), instruments as {CROSS_AVG_WINDOW} means")
     fig.tight_layout()
     finish_figure(fig, f"era5_mast_lidar_timeseries_{h_mast:03d}m")
 
@@ -1768,33 +1773,124 @@ if SAVE_FIG_DIR is not None:
     cross_flip_stats.to_csv(SAVE_FIG_DIR / "era5_mast_lidar_flip_effect_stats.csv")
     gate_stats.to_csv(SAVE_FIG_DIR / "era5_vs_lidar_all_gates_stats.csv")
 
-# all range gates pooled in one figure, colour = height.  The statistics in the titles are over the pooled
-# points; the gates of one hour are not independent, so n is not the number of independent samples.
-gate_frames = []
-for gate_index, h in enumerate(LIDAR_HEIGHTS):
-    lid, e5 = lidar_at_level(cross_lidar, h), column_at_level(era5_ml_corridor, h, cross_times)
-    gate_frames.append(pd.concat([lid.add_prefix("lidar_").reset_index(drop=True),
-                                  e5.add_prefix("era5_").reset_index(drop=True)], axis=1).assign(gate=gate_index))
-gates_pooled = pd.concat(gate_frames, ignore_index=True)
-# random drawing order, otherwise the gates plotted last would cover the others
-gates_pooled = gates_pooled.iloc[np.random.default_rng(0).permutation(len(gates_pooled))]
-gate_cmap = LinearSegmentedColormap.from_list("lidar_gates", ["#86b6ef", "#0d366b"]).resampled(len(LIDAR_HEIGHTS))
-gate_norm = BoundaryNorm(np.arange(len(LIDAR_HEIGHTS) + 1) - 0.5, len(LIDAR_HEIGHTS))
+# the four meteomast heights pooled in one figure per pair of CROSS_PAIRS, colour = height.  Heights and
+# sources as in the per-height figures above (LIDAR at the gate of MAST_LIDAR_PAIRS, ERA5 @LIDAR at
+# that gate, all other sources at the mast height).  Each pair uses all hours on which both of its
+# sources have data.  The statistics in the titles are over the pooled points; the heights of one hour
+# are not independent, so n is not the number of independent samples.
+# (figure title, file name), one entry per pair, in the same order as CROSS_PAIRS
+POOLED_FIGURES = [("ERA5 vs meteomast", "era5_mast_vs_meteomast"),
+                  ("meteomast vs LIDAR", "meteomast_vs_lidar"),
+                  ("ERA5 vs LIDAR", "era5_corridor_vs_lidar"),
+                  ("ERA5 @LIDAR vs ERA5 @meteomast", "era5_LIDAR_vs_era5_mast")]
+if len(POOLED_FIGURES) != len(CROSS_PAIRS):
+    raise ValueError("POOLED_FIGURES needs one (title, file name) entry per pair in CROSS_PAIRS")
+# source names as written on the axes of the pooled figures
+POOLED_AXIS_NAMES = {"ERA5 @mast": "ERA5 at meteomast",
+                     "ERA5 @LIDAR": "ERA5 at LIDAR",
+                     "ERA5 @LIDAR, mast height": "ERA5 at LIDAR"}
+pooled_frames = []
+for gate_index, (h_mast, h_lidar) in enumerate(MAST_LIDAR_PAIRS):
+    pooled_frames.append(pd.concat([df.add_prefix(f"{name}|").reset_index(drop=True)
+                                    for name, df in cross_sources(h_mast, h_lidar).items()], axis=1)
+                         .assign(gate=gate_index))
+pooled = pd.concat(pooled_frames, ignore_index=True)
+# random drawing order, otherwise the heights plotted last would cover the others
+pooled = pooled.iloc[np.random.default_rng(0).permutation(len(pooled))]
+pooled_heights = [h_mast for h_mast, _ in MAST_LIDAR_PAIRS]
+# one distinct colour per height (50, 110, 175, 280 m), sampled from viridis
+gate_cmap = plt.get_cmap("viridis").resampled(len(pooled_heights))
+gate_norm = BoundaryNorm(np.arange(len(pooled_heights) + 1) - 0.5, len(pooled_heights))
+# u and v share one axis range, the same in all pooled figures, so that panels and pairs can be compared
+uv_values = pooled[[c for c in pooled.columns if c.endswith(("|u", "|v"))]].values
+uv_lo, uv_hi = np.nanmin(uv_values), np.nanmax(uv_values)
+uv_lims = (uv_lo - 0.05 * (uv_hi - uv_lo), uv_hi + 0.05 * (uv_hi - uv_lo))
 
-fig, axes = plt.subplots(1, len(CROSS_PANELS), figsize=(23, 5.4), layout="constrained")
-for ax, (var, label, circular) in zip(axes, CROSS_PANELS):
-    x, y = gates_pooled[f"lidar_{var}"].values, gates_pooled[f"era5_{var}"].values
-    sel = (gates_pooled["lidar_wspd"].values > MIN_SPEED_DIR) & (gates_pooled["era5_wspd"].values > MIN_SPEED_DIR) if circular \
-        else np.ones(len(x), dtype=bool)
-    scatter_with_fit(ax, x[sel], y[sel], f"LIDAR {label}", f"ERA5 @corridor {label}",
-                     title=f"{var}, n={int(np.isfinite(x[sel] + y[sel]).sum())}", circular=circular,
-                     c=gates_pooled["gate"].values[sel],
-                     scatter_kw=dict(s=7, alpha=0.8, linewidths=0, cmap=gate_cmap, norm=gate_norm))
-colorbar = fig.colorbar(ScalarMappable(norm=gate_norm, cmap=gate_cmap), ax=axes, ticks=range(len(LIDAR_HEIGHTS)), pad=0.01)
-colorbar.ax.set_yticklabels(LIDAR_HEIGHTS)
-colorbar.set_label("LIDAR range gate / m")
-fig.suptitle(f"ERA5 at the ship corridor vs LIDAR, all range gates, LIDAR as {CROSS_AVG_WINDOW} means")
-finish_figure(fig, "era5_vs_lidar_all_gates_scatter")
+for (pair, nx, ny), (fig_title, file_name) in zip(CROSS_PAIRS, POOLED_FIGURES):
+    fig, axes = plt.subplots(1, len(CROSS_PANELS), figsize=(23, 5.4), layout="constrained")
+    for ax, (var, label, circular) in zip(axes, CROSS_PANELS):
+        x, y = pooled[f"{nx}|{var}"].values, pooled[f"{ny}|{var}"].values
+        sel = (pooled[f"{nx}|wspd"].values > MIN_SPEED_DIR) & (pooled[f"{ny}|wspd"].values > MIN_SPEED_DIR) if circular \
+            else np.ones(len(x), dtype=bool)
+        scatter_with_fit(ax, x[sel], y[sel], f"{POOLED_AXIS_NAMES.get(nx, nx)} {label}",
+                         f"{POOLED_AXIS_NAMES.get(ny, ny)} {label}",
+                         title=f"{var}, n={int(np.isfinite(x[sel] + y[sel]).sum())}", circular=circular,
+                         lims=uv_lims if var in ("u", "v") else None,
+                         c=pooled["gate"].values[sel],
+                         scatter_kw=dict(s=7, alpha=0.8, linewidths=0, cmap=gate_cmap, norm=gate_norm))
+    colorbar = fig.colorbar(ScalarMappable(norm=gate_norm, cmap=gate_cmap), ax=axes,
+                            ticks=range(len(pooled_heights)), pad=0.01)
+    colorbar.ax.set_yticklabels(pooled_heights)
+    colorbar.set_label("height / m")
+    fig.suptitle(f"{fig_title}, {CROSS_AVG_WINDOW} means")
+    finish_figure(fig, f"pooled_heights_scatter_{file_name}")
+
+# ERA5 at the LIDAR vs LIDAR, with the LIDAR as CROSS_AVG_WINDOW and as LIDAR_SHORT_AVG means, on the same
+# hours and the same four gates as above.  The LIDAR records are 10-min means stamped at their centre
+# (:05, :15, ...), so the 10-min window around an ERA5 hour holds the single record that ends at the full
+# hour.  If the ERA5 - LIDAR scatter hardly grows from 1 h to 10 min, it is dominated by the model and
+# the 30 km grid box, not by the short-term variability of the wind at the LIDAR.  That variability is
+# measured directly by the spread of the 10-min records within the hour (printed below).
+LIDAR_SHORT_AVG = "10min"
+cross_lidar_short = average_to_model_times(lidar, cross_times, window=LIDAR_SHORT_AVG)
+
+
+def spread_in_window(meas_df, model_times, window):
+    """Standard deviation of the records in [t - window/2, t + window/2) for every model time t."""
+    df = meas_df.select_dtypes("number").copy()
+    df.index = df.index.tz_convert(None) if df.index.tz is not None else df.index
+    df.index = df.index + pd.Timedelta(window) / 2
+    return df.resample(window).std().reindex(pd.DatetimeIndex(model_times))
+
+
+cross_lidar_spread = spread_in_window(lidar, cross_times, CROSS_AVG_WINDOW)
+avg_names = {CROSS_AVG_WINDOW: cross_lidar, LIDAR_SHORT_AVG: cross_lidar_short}
+avg_frames = []
+for gate_index, (h_mast, h_lidar) in enumerate(MAST_LIDAR_PAIRS):
+    parts = [column_at_level(era5_ml_corridor, h_lidar, cross_times).add_prefix("ERA5|")]
+    parts += [lidar_at_level(df, h_lidar).add_prefix(f"{avg}|") for avg, df in avg_names.items()]
+    parts.append(pd.DataFrame({f"spread|{var}": cross_lidar_spread[f"{src}_{h_lidar}"].values
+                               for var, src in (("wspd", "wind_speed"), ("u", "u_wind"), ("v", "v_wind"))},
+                              index=cross_times))
+    avg_frames.append(pd.concat([p.reset_index(drop=True) for p in parts], axis=1).assign(gate=gate_index))
+lidar_avg_pooled = pd.concat(avg_frames, ignore_index=True)
+lidar_avg_pooled = lidar_avg_pooled.iloc[np.random.default_rng(0).permutation(len(lidar_avg_pooled))]
+avg_common = np.logical_and.reduce([np.isfinite(lidar_avg_pooled[f"{name}|wspd"].values)
+                                    for name in ["ERA5", *avg_names]])
+
+fig, axes = plt.subplots(len(avg_names), len(CROSS_PANELS), figsize=(23, 5.2 * len(avg_names)), layout="constrained")
+lidar_avg_rows = []
+for row, avg in enumerate(avg_names):
+    for col, (var, label, circular) in enumerate(CROSS_PANELS):
+        x, y = lidar_avg_pooled[f"{avg}|{var}"].values, lidar_avg_pooled[f"ERA5|{var}"].values
+        sel = avg_common & ((lidar_avg_pooled[f"{avg}|wspd"].values > MIN_SPEED_DIR)
+                            & (lidar_avg_pooled["ERA5|wspd"].values > MIN_SPEED_DIR) if circular else True)
+        st = scatter_with_fit(axes[row, col], x[sel], y[sel], f"LIDAR {avg} mean {label}", f"ERA5 at LIDAR {label}",
+                              title=f"LIDAR {avg} means: {var}, n={int(np.isfinite(x[sel] + y[sel]).sum())}",
+                              circular=circular, lims=uv_lims if var in ("u", "v") else None,
+                              c=lidar_avg_pooled["gate"].values[sel],
+                              scatter_kw=dict(s=7, alpha=0.8, linewidths=0, cmap=gate_cmap, norm=gate_norm))
+        lidar_avg_rows.append(dict(variable=var, lidar=avg, **{k: st[k] for k in ("n", "r", "rmse", "bias")}))
+colorbar = fig.colorbar(ScalarMappable(norm=gate_norm, cmap=gate_cmap), ax=axes, ticks=range(len(pooled_heights)),
+                        pad=0.01)
+colorbar.ax.set_yticklabels([h_lidar for _, h_lidar in MAST_LIDAR_PAIRS])
+colorbar.set_label("LIDAR gate / m")
+fig.suptitle(f"ERA5 at LIDAR vs LIDAR as {CROSS_AVG_WINDOW} (top) and {LIDAR_SHORT_AVG} (bottom) means, same hours")
+finish_figure(fig, f"pooled_heights_scatter_era5_vs_lidar_{LIDAR_SHORT_AVG}_vs_{CROSS_AVG_WINDOW}")
+
+lidar_avg_stats = pd.DataFrame(lidar_avg_rows).pivot_table(index="variable", columns="lidar",
+                                                             values=["n", "r", "rmse", "bias"], sort=False)
+# spread of the 10-min records within the hour (std of up to six values), on the same points as above
+spread_stats = pd.DataFrame({var: [np.nanmean(lidar_avg_pooled[f"spread|{var}"].values[avg_common]),
+                                   np.sqrt(np.nanmean(lidar_avg_pooled[f"spread|{var}"].values[avg_common] ** 2))]
+                             for var in ("wspd", "u", "v")}, index=["mean std", "rms std"]).T
+print(f"\nERA5 at LIDAR vs LIDAR, LIDAR as {CROSS_AVG_WINDOW} or {LIDAR_SHORT_AVG} means, same hours, gates pooled "
+      f"(bias = ERA5 - LIDAR)")
+print(lidar_avg_stats.round(2).to_string())
+print(f"\nSpread of the LIDAR 10-min records within the {CROSS_AVG_WINDOW} window / m/s")
+print(spread_stats.round(2).to_string())
+if SAVE_FIG_DIR is not None:
+    lidar_avg_stats.to_csv(SAVE_FIG_DIR / f"era5_vs_lidar_{LIDAR_SHORT_AVG}_vs_{CROSS_AVG_WINDOW}_stats.csv")
 
 # statistics vs height, one row per variable
 fig, axes = plt.subplots(len(CROSS_PANELS), 3, figsize=(13, 3.2 * len(CROSS_PANELS)), sharey=True)
@@ -1809,10 +1905,10 @@ for row, (var, _, _) in enumerate(CROSS_PANELS):
             ax.axvline(0, color="k", linewidth=0.8)
         ax.set_xlabel(label)
         ax.grid(alpha=0.3)
-    axes[row, 0].set_ylabel(f"{var}\nmast height / m")
+    axes[row, 0].set_ylabel(f"{var}\n height / m")
 handles, labels = axes[0, 0].get_legend_handles_labels()
 fig.legend(handles, labels, loc="lower center", ncol=len(PAIR_STYLES), fontsize=9, title="bias = first − second")
-fig.suptitle("ERA5, meteomast and LIDAR: statistics per height, same hours for all comparisons at each height")
+#fig.suptitle("ERA5, meteomast and LIDAR: statistics per height, same hours for all comparisons at each height")
 fig.tight_layout(rect=(0, 0.05, 1, 1))
 finish_figure(fig, "era5_mast_lidar_stats_profile")
 
