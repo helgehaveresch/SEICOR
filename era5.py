@@ -91,7 +91,41 @@ def read_era5_corridor(era5_dir, date, location):
         },
         coords={"time": times, "level": levels, "latitude": lat, "longitude": lon},
     )
-    return profile.sortby("latitude").interp(latitude=location[0], longitude=location[1]).drop_vars(["latitude", "longitude"])
+    profile = profile.sortby("latitude").interp(latitude=location[0], longitude=location[1]).drop_vars(["latitude", "longitude"])
+    return add_wind_uncertainty(profile, era5_dir, day, next_day, location)
+
+
+def add_wind_uncertainty(profile, era5_dir, start, end, location):
+    """Add u_uncertainty, v_uncertainty: the ensemble spread of the ERA5 EDA (era5_ml_spread_YYYYMM.grib).
+
+    The spread is 3-hourly on a coarser grid; it is interpolated bilinearly to location and linearly
+    to the hourly times of the profile, on the same model levels. Without spread file the profile is
+    returned unchanged.
+    """
+    fields, grid = {}, None
+    for month in dict.fromkeys((f"{start:%Y%m}", f"{end:%Y%m}")):
+        path = Path(era5_dir) / f"era5_ml_spread_{month}.grib"
+        if path.exists():
+            new_fields, new_grid = _read_grib(path, start, end)
+            fields.update(new_fields)
+            grid = grid or new_grid
+    if not fields:
+        return profile
+    lat, lon, _ = grid
+    times = sorted({t for name, _, t in fields if name == "u"})
+    levels = profile["level"].values
+    if not all((name, level, t) in fields for name in ("u", "v") for level in levels for t in times):
+        print(f"ERA5 spread incomplete for {start:%Y-%m-%d}: no ERA5 wind uncertainty")
+        return profile
+    spread = xr.Dataset(
+        {f"{name}_uncertainty": (("time", "level", "latitude", "longitude"),
+                                 np.stack([np.stack([fields[(name, level, t)] for level in levels]) for t in times]),
+                                 {"units": "m s-1", "long_name": f"uncertainty of {name}: ensemble spread (standard deviation) of the ERA5 EDA"})
+         for name in ("u", "v")},
+        coords={"time": times, "level": levels, "latitude": lat, "longitude": lon},
+    )
+    spread = spread.sortby("latitude").interp(latitude=location[0], longitude=location[1]).drop_vars(["latitude", "longitude"])
+    return profile.merge(spread.interp(time=profile["time"]))
 
 
 def add_era5_to_plume_ds(ds_plume, era5_profile, max_height_m):

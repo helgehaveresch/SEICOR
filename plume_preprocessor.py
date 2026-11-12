@@ -154,11 +154,19 @@ except Exception as e:
     era5_profile = None
 #%% Initialize flip-corrected LIDAR wind (written by wind_model_meteomast_lidar_comparison.py, 2026 only)
 try:
-    df_lidar = SEICOR.lidar.read_lidar_corrected(Path(settings["bredom_paths"][_plat_key]) / instrument_settings["lidar_file"])
+    _lidar_file = Path(settings["bredom_paths"][_plat_key]) / instrument_settings["lidar_file"]
+    df_lidar = SEICOR.lidar.read_lidar_corrected(_lidar_file)
 except Exception as e:
     print("Error reading LIDAR:", e)
     traceback.print_exc()
     df_lidar = None
+# unaveraged LIDAR profiles next to the corrected file: uncertainty of u, v (std in the 10-min periods)
+try:
+    df_lidar_raw = SEICOR.lidar.read_lidar_raw(_lidar_file.parent, date) if df_lidar is not None else None
+except Exception as e:
+    print("Error reading unaveraged LIDAR:", e)
+    traceback.print_exc()
+    df_lidar_raw = None
 #%% Initialize lp-doas data
 try:
     df_lp_doas_310 = SEICOR.lp_doas.read_lpdoas_310(lp_doas_dir, date)
@@ -314,7 +322,7 @@ for pos, (idx, ship_pass_single) in enumerate(ship_passes.iterrows()):
                 print(f"Error plotting the plume mask of MMSI {ship_pass_single['MMSI']} at {idx}: {e}")
                 traceback.print_exc()
     ds_plume = SEICOR.era5.add_era5_to_plume_ds(ds_plume, era5_profile, instrument_settings["era5_max_height_m"])
-    ds_plume = SEICOR.lidar.add_lidar_to_plume_ds(ds_plume, df_lidar)
+    ds_plume = SEICOR.lidar.add_lidar_to_plume_ds(ds_plume, df_lidar, df_lidar_raw=df_lidar_raw)
     ds_plume.to_netcdf(Path(ship_pass_single['plume_file']), mode="w")
     # record result back into ship_passes dataframe so it can be saved
     ship_passes.iat[pos, ship_passes.columns.get_loc('plume_or_ship_found')] = ds_plume.attrs.get('plume_or_ship_found', 'False')

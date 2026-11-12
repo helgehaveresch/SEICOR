@@ -4,6 +4,8 @@ and the Wettermast Hamburg-Billwerder.
  
 Saves per month to D:\\SEICOR\\ERA5:
   era5_ml_YYYYMM.grib      u, v, T, q on model levels 121-137
+  era5_ml_spread_YYYYMM.grib  ensemble spread (EDA standard deviation) of u, v on the same
+                           levels, 3-hourly on a 0.5 deg grid: the uncertainty of the ERA5 wind
   era5_lnsp_z_YYYYMM.grib  log surface pressure + surface geopotential
   era5_sl_YYYYMM.grib      single-level fields (PBL height, fluxes, 10/100 m wind, ...)
 T, q, lnsp and z are needed to compute the actual height of each level.
@@ -40,6 +42,7 @@ YEARS_MONTHS = [(y, m) for y in range(FIRST_MONTH[0], LAST_MONTH[0] + 1) for m i
 AREA = "54.0/9.25/53.25/10.5"
 
 GRID = "0.25/0.25"
+SPREAD_GRID = "0.5/0.5"                    # the EDA runs at about half the resolution of ERA5
 LEVELS = "121/to/137"                      # ~715 m down to ~10 m
 MAX_PARALLEL = 8                           # requests sent to the CDS at once; the CDS queues
                                            # anything above its own per-user limit anyway
@@ -88,7 +91,7 @@ SINGLE_LEVEL_VARS = [
  
  
 def month_jobs(year, month):
-    """The three requests of one month as (dataset, request, target file)."""
+    """The four requests of one month as (dataset, request, target file)."""
     last = calendar.monthrange(year, month)[1]
     common = {
         "class": "ea",
@@ -124,6 +127,11 @@ def month_jobs(year, month):
         "sfc": ("reanalysis-era5-complete",
                 {**common, "levelist": "1", "param": "129/152"},            # surface geopotential, lnsp
                 OUTDIR / f"era5_lnsp_z_{year}{month:02d}.grib"),
+        # ensemble spread of the 10-member EDA (standard deviation of u, v), 3-hourly
+        "spread": ("reanalysis-era5-complete",
+                   {**common, "stream": "enda", "type": "es", "time": "00/to/21/by/3",
+                    "grid": SPREAD_GRID, "levelist": LEVELS, "param": "131/132"},
+                   OUTDIR / f"era5_ml_spread_{year}{month:02d}.grib"),
     }
 
 
@@ -203,7 +211,7 @@ if __name__ == "__main__":
     OUTDIR.mkdir(parents=True, exist_ok=True)
     jobs = [month_jobs(y, m) for y, m in YEARS_MONTHS]
     # the fast single-level requests first, so they do not wait behind the slow tape requests
-    queue = [job[kind] for kind in ("sl", "ml", "sfc") for job in jobs]
+    queue = [job[kind] for kind in ("sl", "ml", "sfc", "spread") for job in jobs]
     todo = [j for j in queue if not j[2].exists()]
 
     log("looking for matching requests at the CDS ...")
