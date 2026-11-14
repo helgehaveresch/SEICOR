@@ -582,20 +582,28 @@ def detect_plume_ztest_iterative(
     return plume_mask, ship_mask, plume_masks, ship_masks
 
 
-def plume_mask_of(ds, plume_mask_settings):
-    """Iterative z-test plume mask (and ship mask) of the enhancement image of ds: first pass with
-    the statistics of the upwind (and downwind) reference images, then the background is
-    re-estimated from the reference pixels plus the plume-window pixels outside plume and ship.
-    plume_mask_settings is the processing/plume_mask section of the preprocessor settings."""
-    enh_var = "no2_enhancement_interp" if "no2_enhancement_interp" in ds else "no2_enhancement_c_back"
+def reference_image(ds):
+    """Upwind (and, if present, downwind) reference image(s), each minus its own time mean per row,
+    joined along window_ref: its std is the noise level of the z-tests (no plume in the references)."""
     ref_image = ds["no2_ref"] - ds["no2_ref"].mean(dim="window_ref")
     if "no2_ref_down" in ds:
         ref_image_down = ds["no2_ref_down"] - ds["no2_ref_down"].mean(dim="window_ref_down")
         ref_image_down = ref_image_down.rename({"window_ref_down": "window_ref"})  # unify dimension name
         ref_image = xr.concat([ref_image, ref_image_down], dim="window_ref", join="outer")
+    return ref_image
+
+
+def plume_mask_of(ds, plume_mask_settings):
+    """Iterative z-test plume mask (and ship mask) of the enhancement image of ds: first pass with
+    the median of the enhancement image (plume window) as background level and the std of the
+    upwind (and downwind) reference images as noise level, then the background is
+    re-estimated from the reference pixels plus the plume-window pixels outside plume and ship.
+    plume_mask_settings is the processing/plume_mask section of the preprocessor settings."""
+    enh_var = "no2_enhancement_interp" if "no2_enhancement_interp" in ds else "no2_enhancement_c_back"
+    ref_image = reference_image(ds)
     mask, ship_mask, _, _ = detect_plume_ztest_iterative(
         ds[enh_var].values,
-        bg_mean=ref_image.mean().values,
+        bg_mean=float(np.nanmedian(ds[enh_var].values)),  # level of the plume window (robust to the plume), as in sort_plumes
         bg_std=ref_image.std().values,
         bg_extra=ref_image.values if plume_mask_settings["bg_include_references"] else None,
         p_threshold=plume_mask_settings["p_threshold"],
@@ -776,7 +784,9 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
     ship_min_cluster_size pixels. The plume is searched from plume_seconds_before before to
     plume_seconds_after after the pass time (the source region of the plume mask; None:
     time_tolerance_seconds), the ship within +-time_tolerance_seconds.
-    The background level of the z-test is the median of the enhancement image (robust to the plume).
+    The background level of the z-test is the median of the enhancement image (robust to the plume),
+    its noise level the std of the reference image(s) (reference_image; the std of the enhancement
+    image only if ds_plume has no no2_ref), for the plume and the ship test.
     Rows are the original IMPACT viewing direction numbers (image_row coordinate), so they
     keep pointing at the same elevations when the lowest viewing directions are dropped.
     Sets ds_plume.attrs["plume_or_ship_found"] to "True"/"False".
@@ -814,7 +824,13 @@ def sort_plumes(ds_plume, out_dir, date, p_threshold_plume=0.15, p_threshold_shi
     idx = np.nonzero(win_mask)[0]
     image_cut_plume = ds_plume[varname].isel(image_row = slice_rows, window_plume = idx).values
     bg_mean_val = float(np.nanmedian(ds_plume[varname].values))  # median: robust to the plume itself
-    bg_std_val = ds_plume[varname].std().values
+    if "no2_ref" in ds_plume:
+        bg_std_val = float(reference_image(ds_plume).std())  # noise of the reference images, not of the plume image
+    else:
+        warnings.warn(f"MMSI {ds_plume.attrs.get('mmsi')} at {ds_plume.attrs.get('t')}: no reference image "
+                      "(no2_ref), plume/ship detection uses the std of the plume image")
+        bg_std_val = float(ds_plume[varname].std())
+    ds_plume.attrs["detection_bg_std"] = bg_std_val
     mask = detect_plume_ztest(image_cut_plume, bg_mean = bg_mean_val, bg_std= bg_std_val, p_threshold=p_threshold_plume,
                               min_cluster_size=plume_min_cluster_size)
 

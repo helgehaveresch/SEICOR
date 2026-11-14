@@ -113,14 +113,18 @@ def _measurement_times(ds):
     return times.values
 
 
-def coarsen_impact_measurements(ds, time_resolution_seconds):
+def coarsen_impact_measurements(ds, time_resolution_seconds, weight_var="ints"):
     """Average the IMPACT measurements (dim_0) in fixed time bins of time_resolution_seconds.
 
     The bins are aligned to midnight UTC of the first measurement, so other datasets of the same
     day (e.g. the upwind DOAS fit) get the same bins. All measurements in a bin are averaged
-    ignoring NaN, the fit errors sig[...] are propagated as sqrt(sum sig^2) / n, and datetime is
-    the bin centre, i.e. a regular time grid. Bins without measurements are dropped, so gaps stay
-    gaps. dim_0 keeps the index of the first raw measurement in each bin.
+    ignoring NaN, weighted by the intensity weight_var (the "ints" column of the NO2_VIS files,
+    per pixel = viewing direction and time; non-finite or negative intensities get weight 0):
+    x = sum(w x) / sum(w), and the fit errors sig[...] are propagated as sqrt(sum w^2 sig^2) / sum(w).
+    Variables that do not have all dimensions of weight_var, weight_var itself, and the whole
+    dataset if weight_var is missing (or None) are averaged unweighted (sig: sqrt(sum sig^2) / n).
+    datetime is the bin centre, i.e. a regular time grid. Bins without measurements are dropped,
+    so gaps stay gaps. dim_0 keeps the index of the first raw measurement in each bin.
 
     attrs: coarsen_time_resolution_seconds, and coarsen_factor = bin length / median raw time
     step (about the number of raw measurements per bin), used to scale settings that count
@@ -139,8 +143,13 @@ def coarsen_impact_measurements(ds, time_resolution_seconds):
     starts = np.flatnonzero(np.r_[True, bins[1:] != bins[:-1]])  # first raw measurement of each bin
     centres = (day0_ns + bins[starts] * res_ns + res_ns // 2).astype("datetime64[ns]")
 
+    weights = None
+    if weight_var is not None and weight_var in ds.data_vars and "dim_0" in ds[weight_var].dims:
+        weights = ds[weight_var].astype(float)
+        weights = weights.where(np.isfinite(weights) & (weights >= 0), 0.0)
+
     out = ds.isel(dim_0=starts)  # coordinates and variables without dim_0
-    with np.errstate(invalid="ignore", divide="ignore"):  # all-NaN bins give NaN
+    with np.errstate(invalid="ignore", divide="ignore"):  # all-NaN / zero-weight bins give NaN
         for name, var in ds.data_vars.items():
             if "dim_0" not in var.dims:
                 continue
@@ -150,13 +159,18 @@ def coarsen_impact_measurements(ds, time_resolution_seconds):
             else:
                 values = var.transpose(*dims).values.astype(float)
                 valid = np.isfinite(values)
-                count = np.add.reduceat(valid, starts, axis=-1)
-                if name.startswith("sig["):
-                    reduced = np.sqrt(np.add.reduceat(np.where(valid, values ** 2, 0.0), starts, axis=-1)) / count
+                if weights is not None and name != weight_var and set(weights.dims) <= set(var.dims):
+                    w = np.where(valid, weights.broadcast_like(var).transpose(*dims).values, 0.0)
                 else:
-                    reduced = np.add.reduceat(np.where(valid, values, 0.0), starts, axis=-1) / count
+                    w = valid.astype(float)  # unweighted mean
+                w_sum = np.add.reduceat(w, starts, axis=-1)
+                if name.startswith("sig["):
+                    reduced = np.sqrt(np.add.reduceat(np.where(valid, (w * values) ** 2, 0.0), starts, axis=-1)) / w_sum
+                else:
+                    reduced = np.add.reduceat(np.where(valid, w * values, 0.0), starts, axis=-1) / w_sum
             out[name] = (dims, reduced, var.attrs)
             out[name] = out[name].transpose(*var.dims)
+    out.attrs["coarsen_weight_var"] = weight_var if weights is not None else "none"
     out.attrs["coarsen_time_resolution_seconds"] = float(time_resolution_seconds)
     out.attrs["coarsen_factor"] = float(time_resolution_seconds / (np.median(np.diff(t_ns)) / 1e9))
     return out

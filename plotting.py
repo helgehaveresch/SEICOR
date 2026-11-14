@@ -18,6 +18,12 @@ import zipfile
 from io import BytesIO
 
 
+# label of the NO2 SCD enhancement (in the LaTeX manuscript: $\Delta\mathrm{SCD}_{\chem{NO_2}}$; matplotlib does not
+# know \chem, \mathrm{NO_2} renders the same upright subscript)
+NO2_ENH = r"$\Delta\mathrm{SCD}_{\mathrm{NO_2}}$"
+O4_ENH = r"$\Delta\mathrm{SCD}_{\mathrm{O_4}}$"
+
+
 def enhancement_vars(ds_plume):
     """Names of the NO2 enhancement image and its vertical integral to plot, plus a label.
 
@@ -588,12 +594,12 @@ def plot_single_ship(
         )
         ax.xaxis_date()
         cbar = plt.colorbar(pcm)
-        cbar.set_label(r"NO$_2$ Enh. / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=22)
+        cbar.set_label(NO2_ENH + r" / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=22)
         cbar.ax.tick_params(labelsize=18)
         cbar.ax.yaxis.get_offset_text().set_fontsize(18)
         ax.set_xlabel("Time (UTC)", fontsize=22)
         ax.set_ylabel("Viewing direction", fontsize=22)
-        title = "NO$_2$ dSCD Enhancements"
+        title = NO2_ENH
         if include_mmsi:
             title += f", MMSI: {mmsi}"
         if include_timestamp:
@@ -619,7 +625,7 @@ def plot_single_ship(
         plt.plot(times_sel, no2_integrated, color='tab:blue', linewidth=2)
         plt.xlabel("Time (UTC)", fontsize=18)
         plt.ylabel(r"NO$_2$ dSCD int. / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=18)
-        plt.title("Vertically Integrated NO$_2$ Enhancement", fontsize=20)
+        plt.title("Vertically integrated " + NO2_ENH, fontsize=20)
         plt.gca().xaxis.set_major_locator(mdates.MinuteLocator(interval=x_axis_tick_interval))
         plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
         plt.gca().tick_params(axis='x', labelsize=16)
@@ -643,12 +649,12 @@ def plot_single_ship(
         )
         ax.xaxis_date()
         cbar = plt.colorbar(pcm, ax=ax)
-        cbar.set_label(r"NO$_2$ Enh. / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=20)
+        cbar.set_label(NO2_ENH + r" / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=20)
         cbar.ax.tick_params(labelsize=18)
         cbar.ax.yaxis.get_offset_text().set_fontsize(18)
 
         ax.set_ylabel("VEA / °", fontsize=22)
-        ax.set_title("NO$_2$ dSCD Enhancements", fontsize=20)
+        ax.set_title(NO2_ENH, fontsize=20)
 
         set_elevation_yticks(ax, vea, fontsize=18)
 
@@ -835,7 +841,7 @@ def plot_ship_pass_subplot_v1(
     _m = positive_color_limit(_data)
     pcm = ax0.pcolormesh(X, Y, enh_mesh, shading='flat', cmap='bwr', vmin=-_m, vmax=_m)
     ax0.xaxis_date()
-    fig.colorbar(pcm, ax=ax0, label=r"NO$_2$ Enhancement / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
+    fig.colorbar(pcm, ax=ax0, label=NO2_ENH + r" / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
     tstr_fname = pd.to_datetime(ds_plume.t).strftime('%Y%m%d_%H%M%S')
     ax0.set_title(f"MMSI {ds_plume.mmsi} NO2 around {tstr_display}\n({enh_label})")
@@ -850,7 +856,7 @@ def plot_ship_pass_subplot_v1(
     ax1 = fig.add_subplot(gs[0, 1])
     int_var = enh_int_var if enh_int_var in ds_plume else "vertically_integrated_no2_enhancement"  # old plume files
     ax1.plot(ds_plume["times_window"], ds_plume[int_var], color='tab:blue')
-    ax1.set_title("Vertically integrated NO$_2$ enhancement")
+    ax1.set_title("Vertically integrated " + NO2_ENH)
     ax1.set_xlabel("Time")
     ax1.set_ylabel(r"Integrated NO$_2$ dSCD / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
@@ -1021,7 +1027,7 @@ def plot_ship_pass_subplot_v2(
     _m = positive_color_limit(_data)
     pcm = ax0.pcolormesh(X, Y, enh_mesh, shading='flat', cmap='bwr', vmin=-_m, vmax=_m)
     ax0.xaxis_date()
-    fig.colorbar(pcm, ax=ax0, label=r"NO$_2$ Enhancement / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
+    fig.colorbar(pcm, ax=ax0, label=NO2_ENH + r" / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
     tstr_fname = pd.to_datetime(ds_plume.t).strftime('%Y%m%d_%H%M%S')
     ax0.set_title(f"MMSI {ds_plume.mmsi} NO2 around {tstr_display}\n({enh_label})")
@@ -1035,7 +1041,7 @@ def plot_ship_pass_subplot_v2(
     # Integrated NO2
     ax1 = fig.add_subplot(gs[0, 1])
     ax1.plot(times_num, ds_plume[enh_int_var], color='tab:blue')
-    ax1.set_title("Vertically integrated NO$_2$ enhancement")
+    ax1.set_title("Vertically integrated " + NO2_ENH)
     ax1.set_xlabel("Time")
     ax1.set_ylabel(r"Integrated NO$_2$ dSCD / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
@@ -1395,11 +1401,11 @@ def plot_no2_enhancement_and_insitu(
     line1, = ax1.plot(
         ds_impact["datetime"].isel(viewing_direction=0),
         ds_impact["NO2_enhancement_rolling_back"].mean(dim="viewing_direction"),
-        label="NO2 Enhancement",
+        label=NO2_ENH,
         color='blue'
     )
     ax1.set_xlabel("Time")
-    ax1.set_ylabel("Satellite NO2 Enhancement")
+    ax1.set_ylabel("Satellite " + NO2_ENH)
     ax1.set_title(title)
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
 
@@ -1634,7 +1640,7 @@ def plot_timeseries_and_enhancement(ds_impact_masked, time, orig , fit, enhancem
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
     ax1.plot(pd.to_datetime(time), ds_impact_masked[orig], label='NO$_2$ dSCDs', alpha=0.6, linewidth=2)
     ax1.plot(pd.to_datetime(time), ds_impact_masked[fit], label='Fit', color='red', linewidth=2)
-    ax1.plot(pd.to_datetime(time), ds_impact_masked[enhancement], label='Enhancements', color='red', linewidth=2)
+    ax1.plot(pd.to_datetime(time), ds_impact_masked[enhancement], label=NO2_ENH, color='red', linewidth=2)
 
     ax1.set_xlabel("Time (UTC)", fontsize=14)
     ax1.set_ylabel(r"NO$_2$ dSCD / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$", fontsize=14)
@@ -1757,7 +1763,7 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
     mmsi = ds_plume.attrs.get('mmsi', 'unknown_mmsi')
     ax.set_title(f"NO$_2$ date: {date}, mmsi: {mmsi} ({enh_label})")
     cbar = fig.colorbar(mesh, ax=ax)
-    cbar.set_label("NO$_2$ enhancement")
+    cbar.set_label(NO2_ENH)
     out_folder = out_dir / f"plume_mask" / f"plumes_{date}"
     out_folder.mkdir(parents=True, exist_ok=True)
     try:
@@ -1807,7 +1813,7 @@ def plot_no2_enhancement_with_plume_and_ship_mask(ds_plume, plume_mask, ship_mas
 
     mmsi = ds_plume.attrs.get('mmsi', 'unknown_mmsi')
     cbar = fig.colorbar(mesh, ax=ax)
-    cbar.set_label("NO$_2$ enhancement")
+    cbar.set_label(NO2_ENH)
     try:
         t_attr = ds_plume.attrs.get('t')
         tstr = pd.to_datetime(t_attr).strftime('%Y%m%d_%H%M%S') if t_attr is not None else "unknown_time"
