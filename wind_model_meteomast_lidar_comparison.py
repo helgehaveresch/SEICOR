@@ -3,7 +3,7 @@
 Compare the WRF wind model (v1_2, LIDAR test period May/June 2026) with
 
   (a) the Uni Hamburg meteomast at Billwerder (FF/DD at 50/110/175/280 m) and
-  (b) the ZX wind LIDAR at Wedel (10-min averages at 10 ... 279 m).
+  (b) the ZX wind LIDAR at Wedel (10-min averages at 11 ... 280 m above ground = gate label + 1 m).
 
 Workflow
   1. Read the Billwerder minutely data and extract the model column above the mast.
@@ -70,8 +70,13 @@ SHIP_CORRIDOR_LAT, SHIP_CORRIDOR_LON = 53.56634576422346, 9.690192228678288
 LIDAR_LAT, LIDAR_LON = 53.56957, 9.69191  # from the GPS column of the LIDAR files (~350 m N of the corridor)
 MODEL_TARGET_NAME = "lidar"               # "ship_corridor" or "lidar" -> which column of the model is compared to the LIDAR
 MODEL_TARGETS = {"ship_corridor": (SHIP_CORRIDOR_LAT, SHIP_CORRIDOR_LON), "lidar": (LIDAR_LAT, LIDAR_LON)}
-# LIDAR range gates (38 m is a fixed reference gate and is skipped)
-LIDAR_HEIGHTS = [10, 24, 39, 59, 79, 109, 139, 174, 219, 279]
+# LIDAR range gates as labelled in the files (38 m is a fixed reference gate and is skipped)
+LIDAR_GATES = [10, 24, 39, 59, 79, 109, 139, 174, 219, 279]
+# m; the gate labels are 1 m below the true height above ground, so every LIDAR height in this script
+# (column names, model/ERA5 heights, labels) is gate label + LIDAR_HEIGHT_OFFSET.  Only read_lidar() and the
+# written LIDAR_CORRECTED_FILE (read by plume_preprocessor.py via lidar.py) use the gate labels.
+LIDAR_HEIGHT_OFFSET = 1
+LIDAR_HEIGHTS = [g + LIDAR_HEIGHT_OFFSET for g in LIDAR_GATES]
 # both model columns are extracted on the same heights, so that the two points in the domain can
 # be compared against each other as well as against their respective instrument
 MODEL_COLUMN_HEIGHTS = sorted(set(BILLWERDER_HEIGHTS) | set(LIDAR_HEIGHTS))
@@ -80,14 +85,14 @@ BILLWERDER_FOCUS_HEIGHT = 110              # height of the combined scatter + ti
 
 # ----------------------------------------------------------------------------- comparison settings
 MASK_HEIGHTS = [110]              # meteomast heights used for the model/mast agreement mask
-MASK_HEIGHTS_LIDAR = [109]        # LIDAR gate closest to MASK_HEIGHTS, for the alternative mask
+MASK_HEIGHTS_LIDAR = [110]        # LIDAR height closest to MASK_HEIGHTS, for the alternative mask
 MASK_SOURCE = "meteomast"         # "meteomast" or "lidar": which of the two masks drives the comparison.
                                   # "lidar" is circular for the LIDAR-vs-model statistics below (it selects
                                   # exactly the hours on which the two agree) - use it as a diagnostic only.
 MASK_TOL = 3.0            # m/s; keep model hours with |u_meas - u_model| < tol and |v_meas - v_model| < tol
-# (meteomast height, LIDAR gate) pairs for the direct instrument-to-instrument comparison;
+# (meteomast height, LIDAR height) pairs for the direct instrument-to-instrument comparison;
 # the two sites are ~30 km apart, so this compares two locations, not two collocated sensors
-MAST_LIDAR_PAIRS = [(50, 59), (110, 109), (175, 174), (280, 279)]
+MAST_LIDAR_PAIRS = [(50, 60), (110, 110), (175, 175), (280, 280)]
 # both instruments are averaged into this common window for that comparison; the LIDAR record is
 # natively 10-min, so "10min" passes it through unchanged and anything coarser aggregates it
 MEAS_COMPARE_WINDOW = "20min"
@@ -126,6 +131,12 @@ ERA5_MASK_TOL = 3                    # m/s; tolerance of the ERA5 mask (the WRF 
 # --------------------------------------------------- ERA5 / meteomast / LIDAR comparison (section 12)
 ERA5_ML_DIR = Path(r"D:\SEICOR\ERA5")  # monthly model-level GRIB files from download_era_5.py
 CROSS_AVG_WINDOW = "1h"                # both instruments are averaged in this window around each ERA5 hour
+# m/s; hours on which ERA5 at the mast and the meteomast differ by more than this in u or v at any of the
+# CROSS_FILTER_MAST_HEIGHTS are left out of the whole section; hours without mast data there are kept;
+# None -> all hours are kept
+CROSS_ERA5_MAST_UV_TOL = 2.5
+CROSS_FILTER_MAST_HEIGHTS = [110]      # meteomast heights checked by that filter
+CROSS_UV_TS_PAIR = (110, 110)          # (meteomast height, LIDAR height) of the u/v time series with 10-min data
 
 
 # ============================================================================= helpers: wind vectors / stats
@@ -507,10 +518,11 @@ def read_lidar(dir_path, station=LIDAR_STATION, heights=LIDAR_HEIGHTS, year=LIDA
     averaging_period = pd.Timedelta("10min") if station.startswith("Wind10") else pd.Timedelta("1s")
     df = pd.DataFrame(index=pd.DatetimeIndex(time + averaging_period / 2, name="time"))
     for h in heights:
-        df[f"wind_speed_{h}"] = raw[f"Horizontal Wind Speed (m/s) at {h}m"].values
-        df[f"wind_dir_{h}"] = raw[f"Wind Direction (deg) at {h}m"].values
-        df[f"wind_speed_std_{h}"] = raw[f"Horizontal Wind Speed Std. Dev. (m/s) at {h}m"].values
-        df[f"packets_{h}"] = raw[f"Packets in Average at {h}m"].values
+        gate = h - LIDAR_HEIGHT_OFFSET      # columns are named by the true height, the file by the gate label
+        df[f"wind_speed_{h}"] = raw[f"Horizontal Wind Speed (m/s) at {gate}m"].values
+        df[f"wind_dir_{h}"] = raw[f"Wind Direction (deg) at {gate}m"].values
+        df[f"wind_speed_std_{h}"] = raw[f"Horizontal Wind Speed Std. Dev. (m/s) at {gate}m"].values
+        df[f"packets_{h}"] = raw[f"Packets in Average at {gate}m"].values
     df["met_wind_speed"] = raw["Met Wind Speed (m/s)"].values
     df["met_wind_dir"] = raw["Met Wind Direction (deg)"].values
     df = df[df.index.notna()].sort_index()
@@ -895,7 +907,10 @@ else:
     lidar = lidar_raw
     flip_mask, flip_runs = np.zeros(len(lidar_raw), dtype=bool), pd.DataFrame()
 # flip-corrected LIDAR for the plume files (plume_preprocessor.py reads it), time = centre of the 10-min period
-lidar.assign(direction_flipped=flip_mask).to_csv(LIDAR_CORRECTED_FILE)
+# with the gate labels of the files as column names, as lidar.py pairs it with the raw files by those labels
+lidar_gate_names = {f"{var}_{h}": f"{var}_{h - LIDAR_HEIGHT_OFFSET}" for h in LIDAR_HEIGHTS
+                    for var in ("wind_speed", "wind_dir", "wind_speed_std", "packets", "u_wind", "v_wind")}
+lidar.rename(columns=lidar_gate_names).assign(direction_flipped=flip_mask).to_csv(LIDAR_CORRECTED_FILE)
 
 lidar_variants ={label: average_to_model_times(lidar, model_times, window=win)
                   for label, win in LIDAR_AVERAGES.items()}
@@ -1431,7 +1446,7 @@ finish_figure(fig, "model_point_to_point_difference_hist")
 #%%
 # ERA5 (0.25 deg, hourly instantaneous) at the same point as the WRF column compared to the LIDAR.
 # Everything is put on the ERA5 hours; the LIDAR uses the PRIMARY_AVG averaging around each hour.
-# At 100 m the LIDAR (79/109 m gates) and WRF are interpolated linearly in z.
+# At 100 m the LIDAR (80/110 m heights) and WRF are interpolated linearly in z.
 era5 = load_era5_points({MODEL_TARGET_NAME: (target_lat, target_lon)})[MODEL_TARGET_NAME]
 era5_times = pd.DatetimeIndex(era5["time"].values)
 coarse_model = load_model_columns({MODEL_TARGET_NAME: (target_lat, target_lon, MODEL_COLUMN_HEIGHTS)},
@@ -1649,6 +1664,27 @@ if not np.array_equal(era5_ml_mast["time"].values, era5_ml_corridor["time"].valu
     raise RuntimeError("ERA5 model-level times at the two points differ - delete their caches in CACHE_DIR")
 cross_times = pd.DatetimeIndex(era5_ml_mast["time"].values)
 cross_mast = average_to_model_times(billwerder, cross_times, window=CROSS_AVG_WINDOW)
+
+# agreement filter: drop an hour if ERA5 at the mast differs from the mast by more than CROSS_ERA5_MAST_UV_TOL
+# in u or v at any height of CROSS_FILTER_MAST_HEIGHTS.  Hours without mast data there cannot be checked and
+# are kept.  All later comparisons use only the kept hours.
+cross_tag, cross_filter_note = "", ""
+if CROSS_ERA5_MAST_UV_TOL is not None:
+    uv_dev = np.stack([np.abs(column_at_level(era5_ml_mast, h, cross_times)[var].values
+                              - cross_mast[f"{var}_wind_{h}"].values)
+                       for h in CROSS_FILTER_MAST_HEIGHTS for var in ("u", "v")])
+    checked = np.isfinite(uv_dev).any(axis=0)
+    keep = ~(np.where(np.isfinite(uv_dev), uv_dev, 0.0) > CROSS_ERA5_MAST_UV_TOL).any(axis=0)
+    print(f"\nSection 12 agreement filter (|ERA5 @mast - mast| <= {CROSS_ERA5_MAST_UV_TOL:g} m/s in u and v at "
+          f"{'/'.join(map(str, CROSS_FILTER_MAST_HEIGHTS))} m): {(~keep).sum()} of {checked.sum()} hours with mast data "
+          f"there removed, {(~checked).sum()} hours without mast data there kept unchecked "
+          f"({keep.sum()} of {len(cross_times)} ERA5 hours kept)")
+    cross_times_all, cross_mast_all, cross_keep = cross_times, cross_mast, keep   # for the time series below
+    cross_times, cross_mast = cross_times[keep], cross_mast.loc[cross_times[keep]]
+    filter_heights = "_".join(map(str, CROSS_FILTER_MAST_HEIGHTS))
+    cross_tag = f"_uvtol{CROSS_ERA5_MAST_UV_TOL:g}_{filter_heights}m"
+    cross_filter_note = (f", ERA5 @mast within {CROSS_ERA5_MAST_UV_TOL:g} m/s of mast in u and v "
+                         f"@{'/'.join(map(str, CROSS_FILTER_MAST_HEIGHTS))} m")
 cross_lidar = average_to_model_times(lidar, cross_times, window=CROSS_AVG_WINDOW)
 cross_lidar_raw = average_to_model_times(lidar_raw, cross_times, window=CROSS_AVG_WINDOW)
 site_distance = np.hypot((BILLWERDER_LAT - SHIP_CORRIDOR_LAT) * 111132.0,
@@ -1720,9 +1756,9 @@ for h_mast, h_lidar in MAST_LIDAR_PAIRS:
                 cross_flip_rows.append(dict(pair=pair, variable=var, mast_height=h_mast, lidar="uncorrected",
                                             **{k: st_raw[k] for k in ("n", "r", "rmse", "bias")}))
     fig.suptitle(f"ERA5, meteomast and LIDAR @{h_mast}/{h_lidar} m (mast/LIDAR) — {n_common} common hours, "
-                 f"instruments as {CROSS_AVG_WINDOW} means")
+                 f"instruments as {CROSS_AVG_WINDOW} means{cross_filter_note}")
     fig.tight_layout(rect=(0, 0, 1, 0.985))
-    finish_figure(fig, f"era5_mast_lidar_scatter_{h_mast:03d}m")
+    finish_figure(fig, f"era5_mast_lidar_scatter_{h_mast:03d}m{cross_tag}")
 
     # all four sources on the common hours
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 7), sharex=True)
@@ -1740,14 +1776,51 @@ for h_mast, h_lidar in MAST_LIDAR_PAIRS:
     ax2.set_xlabel("time (UTC)")
     ax2.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=20))
     ax2.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax2.xaxis.get_major_locator()))
-    #ax1.set_title(f"ERA5, meteomast and LIDAR @{h_mast}/{h_lidar} m (mast/LIDAR), instruments as {CROSS_AVG_WINDOW} means")
+    #ax1.set_title(f"ERA5, meteomast and LIDAR @{h_mast}/{h_lidar} m (mast/LIDAR), instruments as {CROSS_AVG_WINDOW} means{cross_filter_note}")
     fig.tight_layout()
-    finish_figure(fig, f"era5_mast_lidar_timeseries_{h_mast:03d}m")
+    finish_figure(fig, f"era5_mast_lidar_timeseries_{h_mast:03d}m{cross_tag}")
 
 cross_stats = pd.DataFrame(cross_rows).set_index(["pair", "variable", "mast_height"])
 print(f"\nERA5, meteomast and LIDAR on common hours, {cross_times[0]} .. {cross_times[-1]}; sites {site_distance:.1f} km "
-      f"apart; instruments as {CROSS_AVG_WINDOW} means; bias = first - second")
+      f"apart; instruments as {CROSS_AVG_WINDOW} means{cross_filter_note}; bias = first - second")
 print(cross_stats[["x_height", "y_height", "n", "r", "rmse", "bias", "slope", "intercept"]].round(2).to_string())
+
+# time series over all hours, the hours removed by the agreement filter greyed out
+if CROSS_ERA5_MAST_UV_TOL is not None:
+    cross_lidar_all = average_to_model_times(lidar, cross_times_all, window=CROSS_AVG_WINDOW)
+    for h_mast, h_lidar in MAST_LIDAR_PAIRS:
+        src_all = {"meteomast": mast_at_level(cross_mast_all, h_mast),
+                   "LIDAR": lidar_at_level(cross_lidar_all, h_lidar),
+                   "ERA5 @mast": column_at_level(era5_ml_mast, h_mast, cross_times_all),
+                   "ERA5 @LIDAR": column_at_level(era5_ml_corridor, h_lidar, cross_times_all)}
+        common_all = np.logical_and.reduce([np.isfinite(df["wspd"].values) for df in src_all.values()])
+        kept, dropped = common_all & cross_keep, common_all & ~cross_keep
+        fig, axes = plt.subplots(len(CROSS_PANELS), 1, figsize=(16, 2.8 * len(CROSS_PANELS)), sharex=True)
+        for name, (color, marker) in CROSS_STYLES.items():
+            h_src = h_lidar if name in ("LIDAR", "ERA5 @LIDAR") else h_mast
+            for ax, (var, _, _) in zip(axes, CROSS_PANELS):
+                y = src_all[name][var].values
+                ax.plot(cross_times_all[dropped], y[dropped], linestyle="none", marker=marker, ms=3, color="0.78")
+                ax.plot(cross_times_all[kept], y[kept], linestyle="none", marker=marker, ms=3, color=color,
+                        label=f"{name} @{h_src} m")
+        handles, labels = axes[0].get_legend_handles_labels()
+        handles.append(plt.Line2D([], [], linestyle="none", marker="o", ms=4, color="0.78"))
+        labels.append(f"removed: |ERA5 @mast − mast| @{'/'.join(map(str, CROSS_FILTER_MAST_HEIGHTS))} m "
+                      f"> {CROSS_ERA5_MAST_UV_TOL:g} m/s in u or v "
+                      f"({dropped.sum()} of {common_all.sum()} h)")
+        for ax, (var, label, _) in zip(axes, CROSS_PANELS):
+            ax.set_ylabel(label)
+            ax.grid(alpha=0.3)
+            if var in ("u", "v"):
+                ax.axhline(0, color="k", linewidth=0.6)
+        axes[1].set_ylim(0, 360)
+        axes[0].legend(handles, labels, fontsize=8, loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=5,
+                       frameon=False)
+        axes[-1].set_xlabel("time (UTC)")
+        axes[-1].xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=20))
+        axes[-1].xaxis.set_major_formatter(mdates.ConciseDateFormatter(axes[-1].xaxis.get_major_locator()))
+        fig.tight_layout()
+        finish_figure(fig, f"era5_mast_lidar_timeseries_{h_mast:03d}m{cross_tag}_removed_grey")
 
 cross_flip_stats = (pd.DataFrame(cross_flip_rows)
                     .pivot_table(index=["pair", "variable", "mast_height"], columns="lidar",
@@ -1769,9 +1842,9 @@ print("\nERA5 at the ship corridor vs LIDAR, all range gates (bias = ERA5 - LIDA
 print(gate_stats.round(2).to_string())
 
 if SAVE_FIG_DIR is not None:
-    cross_stats.to_csv(SAVE_FIG_DIR / "era5_mast_lidar_stats.csv")
-    cross_flip_stats.to_csv(SAVE_FIG_DIR / "era5_mast_lidar_flip_effect_stats.csv")
-    gate_stats.to_csv(SAVE_FIG_DIR / "era5_vs_lidar_all_gates_stats.csv")
+    cross_stats.to_csv(SAVE_FIG_DIR / f"era5_mast_lidar_stats{cross_tag}.csv")
+    cross_flip_stats.to_csv(SAVE_FIG_DIR / f"era5_mast_lidar_flip_effect_stats{cross_tag}.csv")
+    gate_stats.to_csv(SAVE_FIG_DIR / f"era5_vs_lidar_all_gates_stats{cross_tag}.csv")
 
 # the four meteomast heights pooled in one figure per pair of CROSS_PAIRS, colour = height.  Heights and
 # sources as in the per-height figures above (LIDAR at the gate of MAST_LIDAR_PAIRS, ERA5 @LIDAR at
@@ -1822,8 +1895,8 @@ for (pair, nx, ny), (fig_title, file_name) in zip(CROSS_PAIRS, POOLED_FIGURES):
                             ticks=range(len(pooled_heights)), pad=0.01)
     colorbar.ax.set_yticklabels(pooled_heights)
     colorbar.set_label("height / m")
-    fig.suptitle(f"{fig_title}, {CROSS_AVG_WINDOW} means")
-    finish_figure(fig, f"pooled_heights_scatter_{file_name}")
+    fig.suptitle(f"{fig_title}, {CROSS_AVG_WINDOW} means{cross_filter_note}")
+    finish_figure(fig, f"pooled_heights_scatter_{file_name}{cross_tag}")
 
 # ERA5 at the LIDAR vs LIDAR, with the LIDAR as CROSS_AVG_WINDOW and as LIDAR_SHORT_AVG means, on the same
 # hours and the same four gates as above.  The LIDAR records are 10-min means stamped at their centre
@@ -1875,8 +1948,8 @@ colorbar = fig.colorbar(ScalarMappable(norm=gate_norm, cmap=gate_cmap), ax=axes,
                         pad=0.01)
 colorbar.ax.set_yticklabels([h_lidar for _, h_lidar in MAST_LIDAR_PAIRS])
 colorbar.set_label("LIDAR gate / m")
-fig.suptitle(f"ERA5 at LIDAR vs LIDAR as {CROSS_AVG_WINDOW} (top) and {LIDAR_SHORT_AVG} (bottom) means, same hours")
-finish_figure(fig, f"pooled_heights_scatter_era5_vs_lidar_{LIDAR_SHORT_AVG}_vs_{CROSS_AVG_WINDOW}")
+fig.suptitle(f"ERA5 at LIDAR vs LIDAR as {CROSS_AVG_WINDOW} (top) and {LIDAR_SHORT_AVG} (bottom) means, same hours{cross_filter_note}")
+finish_figure(fig, f"pooled_heights_scatter_era5_vs_lidar_{LIDAR_SHORT_AVG}_vs_{CROSS_AVG_WINDOW}{cross_tag}")
 
 lidar_avg_stats = pd.DataFrame(lidar_avg_rows).pivot_table(index="variable", columns="lidar",
                                                              values=["n", "r", "rmse", "bias"], sort=False)
@@ -1890,7 +1963,130 @@ print(lidar_avg_stats.round(2).to_string())
 print(f"\nSpread of the LIDAR 10-min records within the {CROSS_AVG_WINDOW} window / m/s")
 print(spread_stats.round(2).to_string())
 if SAVE_FIG_DIR is not None:
-    lidar_avg_stats.to_csv(SAVE_FIG_DIR / f"era5_vs_lidar_{LIDAR_SHORT_AVG}_vs_{CROSS_AVG_WINDOW}_stats.csv")
+    lidar_avg_stats.to_csv(SAVE_FIG_DIR / f"era5_vs_lidar_{LIDAR_SHORT_AVG}_vs_{CROSS_AVG_WINDOW}_stats{cross_tag}.csv")
+
+# u and v of LIDAR, meteomast and ERA5 at one height of CROSS_UV_TS_PAIR.  Time series: LIDAR and meteomast
+# as CROSS_AVG_WINDOW means centred on the ERA5 hours, ERA5 hourly (meteomast and ERA5 at the mast drawn on
+# top); hours removed by the agreement filter are shaded.  Scatter: every 10-min LIDAR record at the four gates of MAST_LIDAR_PAIRS (colour = height)
+# against ERA5 at the LIDAR site, interpolated linearly in time (u and v) to the record time.  A record is used
+# if its nearest ERA5 hour is kept by the agreement filter.  Neighbouring records and heights are correlated,
+# so n is not the number of independent samples.
+uv_h_mast, uv_h_lidar = CROSS_UV_TS_PAIR
+uv_hours = cross_times_all if CROSS_ERA5_MAST_UV_TOL is not None else cross_times
+uv_removed = uv_hours.difference(cross_times)
+half_hour = pd.Timedelta("30min")
+uv_period = slice(uv_hours[0] - half_hour, uv_hours[-1] + half_hour)
+# instruments as CROSS_AVG_WINDOW means centred on the ERA5 hours (as in the comparison above), on every hour
+# including the removed ones; hours without data are NaN and break the line
+lidar_hourly = lidar_at_level(average_to_model_times(lidar, uv_hours, window=CROSS_AVG_WINDOW), uv_h_lidar)
+mast_hourly = mast_at_level(average_to_model_times(billwerder, uv_hours, window=CROSS_AVG_WINDOW), uv_h_mast)
+era5_uv = {"ERA5 @mast": (column_at_level(era5_ml_mast, uv_h_mast, uv_hours), uv_h_mast),
+           "ERA5 @LIDAR": (column_at_level(era5_ml_corridor, uv_h_lidar, uv_hours), uv_h_lidar)}
+
+# scatter data: LIDAR records at the four gates, ERA5 at the LIDAR site interpolated in time to each record
+# (records sit at :05, :15, ..., so none is half-way between two ERA5 hours)
+lidar_records = lidar.copy()
+lidar_records.index = lidar_records.index.tz_convert(None) if lidar_records.index.tz is not None else lidar_records.index
+lidar_records = lidar_records.loc[uv_period]
+record_times = lidar_records.index
+record_kept = record_times.round("1h").isin(cross_times)
+uv_sc_frames = []
+for gate_index, (_, h_gate) in enumerate(MAST_LIDAR_PAIRS):
+    lid = lidar_at_level(lidar_records, h_gate)
+    e5 = era5_ml_corridor[["u", "v"]].interp(z=float(h_gate)).interp(time=record_times.values)
+    uv_sc_frames.append(pd.DataFrame({"lidar_u": lid["u"].values, "lidar_v": lid["v"].values,
+                                      "era5_u": e5["u"].values, "era5_v": e5["v"].values,
+                                      "gate": gate_index})[record_kept])
+uv_sc = pd.concat(uv_sc_frames, ignore_index=True)
+uv_sc = uv_sc.iloc[np.random.default_rng(0).permutation(len(uv_sc))]   # no height drawn on top of the others
+uv_sc_gates = [h_gate for _, h_gate in MAST_LIDAR_PAIRS]
+
+# sized for a two-column (full text width, ~17 cm) figure in AMT / Copernicus: drawn at the final size, so
+# the font sizes below are the printed ones
+AMT_FULL_WIDTH_IN = 17.0 / 2.54
+UNIT = "(m s$^{-1}$)"
+with plt.rc_context({"font.size": 8, "axes.labelsize": 8, "axes.titlesize": 8, "xtick.labelsize": 7,
+                     "ytick.labelsize": 7, "legend.fontsize": 7, "axes.linewidth": 0.6, "grid.linewidth": 0.4,
+                     "xtick.major.width": 0.6, "ytick.major.width": 0.6}):
+    fig = plt.figure(figsize=(AMT_FULL_WIDTH_IN, 7.0), layout="constrained")
+    grid = fig.add_gridspec(3, 2, height_ratios=[1, 1, 2.1])
+    ts_axes = [fig.add_subplot(grid[0, :])]
+    ts_axes.append(fig.add_subplot(grid[1, :], sharex=ts_axes[0]))
+    sc_axes = [fig.add_subplot(grid[2, col]) for col in range(2)]
+    removed_runs = (uv_removed.to_series().diff() != pd.Timedelta("1h")).cumsum().values
+    removed_spans = [(g.iloc[0] - half_hour, g.iloc[-1] + half_hour)
+                     for _, g in uv_removed.to_series().groupby(removed_runs)] if len(uv_removed) else []
+    for ax, var in zip(ts_axes, ("u", "v")):
+        for t0, t1 in removed_spans:
+            ax.axvspan(t0, t1, color="0.88", linewidth=0, zorder=0)
+        # draw order (zorder): LIDAR, ERA5 at LIDAR site, meteomast, ERA5 at meteomast on top
+        ax.plot(uv_hours, lidar_hourly[var].values, "-", lw=0.6, color=CROSS_STYLES["LIDAR"][0],
+                label=f"LIDAR, {uv_h_lidar} m, {CROSS_AVG_WINDOW.replace('h', ' h')}", zorder=2)
+        ax.plot(uv_hours, mast_hourly[var].values, "-", lw=0.6, color=CROSS_STYLES["meteomast"][0],
+                label=f"meteomast, {uv_h_mast} m, {CROSS_AVG_WINDOW.replace('h', ' h')}", zorder=4)
+        for name, (df, h) in era5_uv.items():
+            color, marker = CROSS_STYLES[name]
+            site = "LIDAR site" if name == "ERA5 @LIDAR" else "meteomast"
+            ax.plot(uv_hours, df[var], linestyle="none", marker=marker, ms=2.2, color=color,
+                    markeredgecolor="white", markeredgewidth=0.2, label=f"ERA5 at {site}, {h} m, 1 h",
+                    zorder=5 if name == "ERA5 @mast" else 3)
+        ax.axhline(0, color="k", linewidth=0.5)
+        ax.set_ylabel(f"{var} {UNIT}")
+        ax.grid(alpha=0.3)
+    ts_axes[0].tick_params(labelbottom=False)
+    ts_axes[0].set_xlim(uv_period.start, uv_period.stop)
+    ts_axes[1].set_xlabel("day")
+    ts_axes[1].xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=12))
+    ts_axes[1].xaxis.set_major_formatter(mdates.ConciseDateFormatter(ts_axes[1].xaxis.get_major_locator()))
+    handles, labels = ts_axes[0].get_legend_handles_labels()
+    if removed_spans:
+        handles.append(plt.Rectangle((0, 0), 1, 1, color="0.88"))
+        labels.append(f"removed by the filter ({len(uv_removed)} of {len(uv_hours)} h)")
+    uv_legend = fig.legend(handles, labels, loc="outside upper center", ncol=3, frameon=False, handlelength=1.5,
+                           columnspacing=1.2, markerscale=1.5)
+    for line in uv_legend.get_lines():
+        line.set_linewidth(1.5)
+
+    uv_sc_values = uv_sc[["lidar_u", "lidar_v", "era5_u", "era5_v"]].values
+    uv_sc_lo, uv_sc_hi = np.nanmin(uv_sc_values), np.nanmax(uv_sc_values)
+    uv_sc_lims = (uv_sc_lo - 0.05 * (uv_sc_hi - uv_sc_lo), uv_sc_hi + 0.05 * (uv_sc_hi - uv_sc_lo))
+    uv_10min_rows = []
+    for ax, var in zip(sc_axes, ("u", "v")):
+        x, y = uv_sc[f"lidar_{var}"].values, uv_sc[f"era5_{var}"].values
+        st = scatter_with_fit(ax, x, y, f"LIDAR {var}, 10 min {UNIT}",
+                              f"ERA5 {var} at LIDAR site, interpolated in time {UNIT}",
+                              title=f"{var}, four heights, n={int(np.isfinite(x + y).sum())}",
+                              lims=uv_sc_lims, c=uv_sc["gate"].values,
+                              scatter_kw=dict(s=2, alpha=0.6, linewidths=0, cmap=gate_cmap, norm=gate_norm))
+        ax.title.set_fontsize(8)
+        for line in ax.lines:
+            line.set_linewidth(0.8)
+        ax.set_aspect("equal", adjustable="box")          # square panel, same scale on both axes
+        ax.set_xlim(*uv_sc_lims)
+        ax.set_ylim(*uv_sc_lims)
+        for axis in (ax.xaxis, ax.yaxis):                 # same ticks on both axes
+            axis.set_major_locator(plt.MultipleLocator(5))
+        ax.legend(loc="lower right", fontsize=6, handlelength=1.5)
+        stat_keys = ("n", "r", "rmse", "bias", "slope", "intercept")
+        uv_10min_rows.append(dict(variable=var, height="all", **{k: st[k] for k in stat_keys}))
+        for gate_index, h_gate in enumerate(uv_sc_gates):
+            g = uv_sc["gate"].values == gate_index
+            st_gate = orthogonal_fit_stats(x[g], y[g])
+            uv_10min_rows.append(dict(variable=var, height=h_gate, **{k: st_gate[k] for k in stat_keys}))
+    uv_colorbar = fig.colorbar(ScalarMappable(norm=gate_norm, cmap=gate_cmap), ax=sc_axes,
+                               ticks=range(len(uv_sc_gates)), shrink=0.8, pad=0.02)
+    uv_colorbar.ax.set_yticklabels(uv_sc_gates)
+    uv_colorbar.set_label("LIDAR height (m)")
+    for ax, letter in zip([*ts_axes, *sc_axes], "abcd"):
+        ax.text(0.005 if ax in ts_axes else 0.02, 0.97, f"({letter})", transform=ax.transAxes, va="top",
+                ha="left", fontsize=8, fontweight="bold",
+                bbox=dict(facecolor="white", edgecolor="none", pad=1) if ax in ts_axes else None)
+    if SAVE_FIG_DIR is not None:       # vector version for the journal
+        SAVE_FIG_DIR.mkdir(parents=True, exist_ok=True)
+        fig.savefig(SAVE_FIG_DIR / f"era5_mast_lidar_uv_timeseries_10min_{uv_h_mast:03d}m{cross_tag}.pdf")
+    finish_figure(fig, f"era5_mast_lidar_uv_timeseries_10min_{uv_h_mast:03d}m{cross_tag}")
+print("\nERA5 at LIDAR (interpolated in time) vs LIDAR 10-min records, kept hours (bias = ERA5 - LIDAR)")
+print(pd.DataFrame(uv_10min_rows).set_index(["variable", "height"]).round(2).to_string())
 
 # statistics vs height, one row per variable
 fig, axes = plt.subplots(len(CROSS_PANELS), 3, figsize=(13, 3.2 * len(CROSS_PANELS)), sharey=True)
@@ -1910,6 +2106,6 @@ handles, labels = axes[0, 0].get_legend_handles_labels()
 fig.legend(handles, labels, loc="lower center", ncol=len(PAIR_STYLES), fontsize=9, title="bias = first − second")
 #fig.suptitle("ERA5, meteomast and LIDAR: statistics per height, same hours for all comparisons at each height")
 fig.tight_layout(rect=(0, 0.05, 1, 1))
-finish_figure(fig, "era5_mast_lidar_stats_profile")
+finish_figure(fig, f"era5_mast_lidar_stats_profile{cross_tag}")
 
 # %%
