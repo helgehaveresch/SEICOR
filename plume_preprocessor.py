@@ -18,8 +18,8 @@ elif _platform.startswith("linux"):
     _default_settings_path = _default_scripts_dir / "SEICOR" / "plume_preprocessor_settings.yaml"
     _plat_key = "linux"
 
-SCRIPTS_DIR = Path("SCRIPTS_DIR", _default_scripts_dir)
-SETTINGS_PATH = Path("PLUME_SETTINGS_PATH", _default_settings_path)
+SCRIPTS_DIR = Path(os.environ.get("SCRIPTS_DIR", _default_scripts_dir))
+SETTINGS_PATH = Path(os.environ.get("PLUME_SETTINGS_PATH", _default_settings_path))  # another settings file, e.g. for test runs
 
 import numpy as np
 sys.path.append(str(SCRIPTS_DIR))

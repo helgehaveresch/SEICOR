@@ -23,6 +23,12 @@ from io import BytesIO
 NO2_ENH = r"$\Delta\mathrm{SCD}_{\mathrm{NO_2}}$"
 O4_ENH = r"$\Delta\mathrm{SCD}_{\mathrm{O_4}}$"
 
+# colours of all SCD plots (also used by plot_processing_steps.py)
+CMAP_DSCD = "magma_r"   # measured dSCDs: light background, dark plume
+CMAP_ENH = "RdBu_r"     # enhancements and other signed quantities (symmetric limits)
+C_PLUME = "#222222"     # plume mask contours
+C_SHIP = "#56B4E9"      # ship mask contours (Okabe-Ito sky blue, visible on the dark blue ship pixels)
+
 
 def enhancement_vars(ds_plume):
     """Names of the NO2 enhancement image and its vertical integral to plot, plus a label.
@@ -71,7 +77,7 @@ MIN_COLOR_LIMIT = 4e16  # the colour scale of the enhancement images covers at l
 
 
 def positive_color_limit(data, min_limit=MIN_COLOR_LIMIT):
-    """Limit of the symmetric colour scale (vmin=-limit, vmax=limit) of the bwr enhancement images:
+    """Limit of the symmetric colour scale (vmin=-limit, vmax=limit) of the diverging enhancement images:
     the highest positive value, so that strongly negative pixels (e.g. the ship) do not stretch the
     scale; values below -limit saturate. The largest absolute value if nothing is positive.
     The limit is at least min_limit, so that images without a plume do not show noise at full colour."""
@@ -563,7 +569,7 @@ def plot_single_ship(
         pcm = ax.pcolormesh(
             X, Y, no2_mesh,
             shading='flat',
-            cmap='bwr', vmin=-_m, vmax=_m
+            cmap=CMAP_ENH, vmin=-_m, vmax=_m
         )
         ax.xaxis_date()
         cbar = plt.colorbar(pcm)
@@ -590,7 +596,7 @@ def plot_single_ship(
         pcm = ax.pcolormesh(
             X, Y, no2_mesh,
             shading='flat',
-            cmap='bwr', vmin=-_m, vmax=_m
+            cmap=CMAP_ENH, vmin=-_m, vmax=_m
         )
         ax.xaxis_date()
         cbar = plt.colorbar(pcm)
@@ -639,13 +645,13 @@ def plot_single_ship(
 
         # --- 2D NO2 enhancement plot ---
         ax = axs[0]
-        # symmetric bwr colormap: choose vmax from data magnitude
+        # symmetric diverging colormap: choose vmax from data magnitude
         _data = np.array(no2_full)
         _m = positive_color_limit(_data)
         pcm = ax.pcolormesh(
             X, Y, no2_mesh,
             shading='flat',
-            cmap='bwr', vmin=-_m, vmax=_m
+            cmap=CMAP_ENH, vmin=-_m, vmax=_m
         )
         ax.xaxis_date()
         cbar = plt.colorbar(pcm, ax=ax)
@@ -839,7 +845,7 @@ def plot_ship_pass_subplot_v1(
     Y = np.arange(ds_plume[enh_var].shape[0] + 1) - 0.5
     _data = np.array(ds_plume[enh_var].values)
     _m = positive_color_limit(_data)
-    pcm = ax0.pcolormesh(X, Y, enh_mesh, shading='flat', cmap='bwr', vmin=-_m, vmax=_m)
+    pcm = ax0.pcolormesh(X, Y, enh_mesh, shading='flat', cmap=CMAP_ENH, vmin=-_m, vmax=_m)
     ax0.xaxis_date()
     fig.colorbar(pcm, ax=ax0, label=NO2_ENH + r" / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
@@ -1025,7 +1031,7 @@ def plot_ship_pass_subplot_v2(
     Y = np.arange(ds_plume[enh_var].shape[0] + 1) - 0.5
     _data = np.array(ds_plume[enh_var].values)
     _m = positive_color_limit(_data)
-    pcm = ax0.pcolormesh(X, Y, enh_mesh, shading='flat', cmap='bwr', vmin=-_m, vmax=_m)
+    pcm = ax0.pcolormesh(X, Y, enh_mesh, shading='flat', cmap=CMAP_ENH, vmin=-_m, vmax=_m)
     ax0.xaxis_date()
     fig.colorbar(pcm, ax=ax0, label=NO2_ENH + r" / $\frac{\#\mathrm{molec.}}{\mathrm{cm}^2}$")
     tstr_display = pd.to_datetime(ds_plume.t).strftime('%Y-%m-%d %H:%M:%S')
@@ -1747,10 +1753,10 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
 
     _data = np.array(data)
     _m = positive_color_limit(_data)
-    mesh = ax.pcolormesh(xedges, yedges, expand_gap_columns(data, columns), cmap="bwr", shading="flat", vmin=-_m, vmax=_m)
+    mesh = ax.pcolormesh(xedges, yedges, expand_gap_columns(data, columns), cmap=CMAP_ENH, shading="flat", vmin=-_m, vmax=_m)
     # contour needs x coords for proper alignment; use mesh coordinates
     Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
-    ax.contour(Xc, Yc, expand_gap_columns(mask, columns), levels=[0.5], colors="red", linewidths=1.5)
+    ax.contour(Xc, Yc, expand_gap_columns(mask, columns), levels=[0.5], colors=C_PLUME, linewidths=1.5)
 
     ax.xaxis_date()
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
@@ -1794,14 +1800,14 @@ def plot_no2_enhancement_with_plume_and_ship_mask(ds_plume, plume_mask, ship_mas
 
     _data = np.array(data)
     _m = positive_color_limit(_data)
-    mesh = ax.pcolormesh(xedges, yedges, expand_gap_columns(data, columns), cmap="bwr", shading="flat", vmin=-_m, vmax=_m)
+    mesh = ax.pcolormesh(xedges, yedges, expand_gap_columns(data, columns), cmap=CMAP_ENH, shading="flat", vmin=-_m, vmax=_m)
 
     xcent = (xedges[:-1] + xedges[1:]) / 2.0
     ycent = (yedges[:-1] + yedges[1:]) / 2.0
     Xc, Yc = np.meshgrid(xcent, ycent)
 
-    plume_contour = ax.contour(Xc, Yc, expand_gap_columns(plume_mask, columns), levels=[0.5], colors="black", linewidths=1.5)
-    ship_contour = ax.contour(Xc, Yc, expand_gap_columns(ship_mask, columns), levels=[0.5], colors="blue", linewidths=1.5)
+    plume_contour = ax.contour(Xc, Yc, expand_gap_columns(plume_mask, columns), levels=[0.5], colors=C_PLUME, linewidths=1.5)
+    ship_contour = ax.contour(Xc, Yc, expand_gap_columns(ship_mask, columns), levels=[0.5], colors=C_SHIP, linewidths=1.5)
 
     ax.xaxis_date()
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
@@ -1866,12 +1872,12 @@ def plot_reference_image_with_plume_mask(ds_plume, out_dir, date, p_threshold=0.
         yedges = np.arange(ny + 1)
         span = f"{times[0]:%H:%M:%S}–{times[-1]:%H:%M:%S}" if len(times) else ""
 
-        mesh_total = ax_row[0].pcolormesh(xedges, yedges, expand_gap_columns(total, columns), cmap="viridis", shading="flat", vmin=t_min, vmax=t_max)
+        mesh_total = ax_row[0].pcolormesh(xedges, yedges, expand_gap_columns(total, columns), cmap=CMAP_DSCD, shading="flat", vmin=t_min, vmax=t_max)
         ax_row[0].set_title(f"{name} reference {span}: total NO$_2$ dSCD")
-        mesh_var = ax_row[1].pcolormesh(xedges, yedges, expand_gap_columns(variability, columns), cmap="bwr", shading="flat", vmin=-v_max, vmax=v_max)
+        mesh_var = ax_row[1].pcolormesh(xedges, yedges, expand_gap_columns(variability, columns), cmap=CMAP_ENH, shading="flat", vmin=-v_max, vmax=v_max)
         Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
         if mask.any():
-            ax_row[1].contour(Xc, Yc, expand_gap_columns(mask, columns), levels=[0.5], colors="red", linewidths=1.5)
+            ax_row[1].contour(Xc, Yc, expand_gap_columns(mask, columns), levels=[0.5], colors=C_PLUME, linewidths=1.5)
         ax_row[1].set_title(f"{name} reference: variability (std {np.nanstd(variability):.2e})")
 
         for ax in ax_row:

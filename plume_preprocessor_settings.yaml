@@ -92,8 +92,8 @@ processing:
     ztest_min_cluster_size: 60
 
   detection: # plume / ship flag (plumes.sort_plumes)
-    p_threshold_plume: 0.03
-    p_threshold_ship: 0.03
+    p_threshold_plume: 0.02
+    p_threshold_ship: 0.02
     time_tolerance_seconds: 60 # the ship is searched within +- this time around the pass; the plume in the source region time window of plume_mask (source_seconds_before/after)
     # background level of the z-test: median of the enhancement image; noise level: std of the reference image(s) (plumes.reference_image)
     plume_rows: [7, 20] # image rows (VEA) searched for the plume, python slice [start, stop)

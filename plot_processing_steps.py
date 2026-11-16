@@ -40,6 +40,7 @@ else:
 sys.path.insert(0, str(SCRIPTS_DIR))
 from SEICOR import impact, plumes  # noqa: E402
 from SEICOR.plotting import NO2_ENH, O4_ENH  # noqa: E402  labels of the SCD enhancements, as in plotting.py
+from SEICOR import plotting  # noqa: E402  colour maps and mask colours shared with all plots
 
 #%% settings: the ship pass and the files
 PASS_KEY = "20250520_063128"   # pass time as in the plume file names, YYYYMMDD_HHMMSS (MMSI 356582000)
@@ -95,13 +96,13 @@ ELEVATIONS = (2.7, 10.3, 20.6)  # elevations (deg) of the time series in (b); th
 # ELEVATIONS = (3.5, 12.0, 25.0)
 # ELEVATIONS = (1.9, 7.7, 15.5)
 
-CMAP_DSCD = "magma_r"           # colour map of the measured dSCDs: light background, dark plume (lines drawn in LINE_DSCD)
+CMAP_DSCD = plotting.CMAP_DSCD  # magma_r; colour map of the measured dSCDs: light background, dark plume (lines drawn in LINE_DSCD)
 # CMAP_DSCD = "magma"             # dark maps: set LINE_DSCD = "white"
 # CMAP_DSCD = "viridis"
 # CMAP_DSCD = "cividis"
 # CMAP_DSCD = "Blues"
 LINE_DSCD = "#222222"           # plume window, default windows and pass time on the dSCD image ("white" for dark maps like viridis)
-CMAP_ENH = "RdBu_r"             # colour map of the enhancements
+CMAP_ENH = plotting.CMAP_ENH    # RdBu_r; colour map of the enhancements
 # CMAP_ENH = "bwr"
 
 PLOT_IMAGE = True               # last row, next to the O4 panel: camera image closest to the pass (<img_dir>/<date>_video.zip or folder)
@@ -129,7 +130,7 @@ O4_UNIT = "10$^{43}$ molec.$^2$ cm$^{-5}$"
 E = 1e16  # display unit of the columns
 INK, MUTED = "#222222", "#666666"  # text and outlines
 C_UP, C_DN = "#0072B2", "#D55E00"  # Okabe-Ito (colour-blind safe)
-C_SHIP = "#56B4E9"  # ship mask and ship region: Okabe-Ito sky blue, light enough to stay visible on the saturated (dark) blue ship pixels
+C_SHIP = plotting.C_SHIP  # #56B4E9: ship mask and ship region: Okabe-Ito sky blue, light enough to stay visible on the saturated (dark) blue ship pixels
 ROW_COLOURS = ["#0072B2", "#D55E00", "#009E73"]
 
 
