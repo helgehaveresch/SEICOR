@@ -1,4 +1,5 @@
 __pycache__/
 *.png
 *.mp4
-*.nc.preproc_start_*
+*.nc
+.preproc_start_*
