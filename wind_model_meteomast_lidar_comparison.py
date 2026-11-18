@@ -58,7 +58,7 @@ MAST_PAD = pd.Timedelta("1h")            # the meteomast is read for the LIDAR p
 ERA5_GRIB = Path(r"D:\SEICOR\ERA5\b0977d2507d43a7a4511f7726e749f39.grib")  # 10u/10v/100u/100v, hourly
 CACHE_DIR = Path(r"D:\wrf_meteo\v1_2")   # extracted model columns are cached here as NetCDF
 FORCE_REEXTRACT = False                  # True -> ignore cached model columns
-SAVE_FIG_DIR = None                      # e.g. Path(r"D:\plots\lidar_model"); None -> only plt.show()
+SAVE_FIG_DIR = Path(r"Q:\BREDOM\SEICOR\ERA5")                # e.g. Path(r"D:\plots\lidar_model"); None -> only plt.show()
 
 # ----------------------------------------------------------------------------- locations / heights
 BILLWERDER_LAT, BILLWERDER_LON = 53.51922389077999, 10.10283134530118
@@ -136,7 +136,7 @@ CROSS_AVG_WINDOW = "1h"                # both instruments are averaged in this w
 # None -> all hours are kept
 CROSS_ERA5_MAST_UV_TOL = 2.5
 CROSS_FILTER_MAST_HEIGHTS = [110]      # meteomast heights checked by that filter
-CROSS_UV_TS_PAIR = (110, 110)          # (meteomast height, LIDAR height) of the u/v time series with 10-min data
+CROSS_UV_TS_PAIR = (110, 110)          # (meteomast height, LIDAR height) of the combined u/v paper figure
 
 
 # ============================================================================= helpers: wind vectors / stats
@@ -1967,10 +1967,11 @@ if SAVE_FIG_DIR is not None:
 
 # u and v of LIDAR, meteomast and ERA5 at one height of CROSS_UV_TS_PAIR.  Time series: LIDAR and meteomast
 # as CROSS_AVG_WINDOW means centred on the ERA5 hours, ERA5 hourly (meteomast and ERA5 at the mast drawn on
-# top); hours removed by the agreement filter are shaded.  Scatter: every 10-min LIDAR record at the four gates of MAST_LIDAR_PAIRS (colour = height)
-# against ERA5 at the LIDAR site, interpolated linearly in time (u and v) to the record time.  A record is used
-# if its nearest ERA5 hour is kept by the agreement filter.  Neighbouring records and heights are correlated,
-# so n is not the number of independent samples.
+# top); hours removed by the agreement filter are shaded.  Scatter: every 10-min LIDAR record at the LIDAR
+# height of CROSS_UV_TS_PAIR (several heights in uv_sc_gates -> colour = height) against ERA5 at the LIDAR site,
+# interpolated linearly in time (u and v) to the record time.  A record is used if its nearest ERA5 hour is
+# kept by the agreement filter.  Neighbouring records are correlated, so n is not the number of independent
+# samples.
 uv_h_mast, uv_h_lidar = CROSS_UV_TS_PAIR
 uv_hours = cross_times_all if CROSS_ERA5_MAST_UV_TOL is not None else cross_times
 uv_removed = uv_hours.difference(cross_times)
@@ -1980,18 +1981,22 @@ uv_period = slice(uv_hours[0] - half_hour, uv_hours[-1] + half_hour)
 # including the removed ones; hours without data are NaN and break the line
 lidar_hourly = lidar_at_level(average_to_model_times(lidar, uv_hours, window=CROSS_AVG_WINDOW), uv_h_lidar)
 mast_hourly = mast_at_level(average_to_model_times(billwerder, uv_hours, window=CROSS_AVG_WINDOW), uv_h_mast)
+# styles of this figure only: the two ERA5 series in similar colours (orange, yellow), meteomast green
+UV_FIG_STYLES = {"LIDAR": ("#2a78d6", "o"), "meteomast": ("#1baf7a", "s"),
+                 "ERA5 @mast": ("#eb6834", "D"), "ERA5 @LIDAR": ("#eda100", "^")}
 era5_uv = {"ERA5 @mast": (column_at_level(era5_ml_mast, uv_h_mast, uv_hours), uv_h_mast),
            "ERA5 @LIDAR": (column_at_level(era5_ml_corridor, uv_h_lidar, uv_hours), uv_h_lidar)}
 
-# scatter data: LIDAR records at the four gates, ERA5 at the LIDAR site interpolated in time to each record
+# scatter data: LIDAR records at the heights of uv_sc_gates, ERA5 at the LIDAR site interpolated in time to each record
 # (records sit at :05, :15, ..., so none is half-way between two ERA5 hours)
 lidar_records = lidar.copy()
 lidar_records.index = lidar_records.index.tz_convert(None) if lidar_records.index.tz is not None else lidar_records.index
 lidar_records = lidar_records.loc[uv_period]
 record_times = lidar_records.index
 record_kept = record_times.round("1h").isin(cross_times)
+uv_sc_gates = [h_lidar for _, h_lidar in MAST_LIDAR_PAIRS]   # [uv_h_lidar] -> only the time-series height
 uv_sc_frames = []
-for gate_index, (_, h_gate) in enumerate(MAST_LIDAR_PAIRS):
+for gate_index, h_gate in enumerate(uv_sc_gates):
     lid = lidar_at_level(lidar_records, h_gate)
     e5 = era5_ml_corridor[["u", "v"]].interp(z=float(h_gate)).interp(time=record_times.values)
     uv_sc_frames.append(pd.DataFrame({"lidar_u": lid["u"].values, "lidar_v": lid["v"].values,
@@ -1999,7 +2004,6 @@ for gate_index, (_, h_gate) in enumerate(MAST_LIDAR_PAIRS):
                                       "gate": gate_index})[record_kept])
 uv_sc = pd.concat(uv_sc_frames, ignore_index=True)
 uv_sc = uv_sc.iloc[np.random.default_rng(0).permutation(len(uv_sc))]   # no height drawn on top of the others
-uv_sc_gates = [h_gate for _, h_gate in MAST_LIDAR_PAIRS]
 
 # sized for a two-column (full text width, ~17 cm) figure in AMT / Copernicus: drawn at the final size, so
 # the font sizes below are the printed ones
@@ -2008,8 +2012,12 @@ UNIT = "(m s$^{-1}$)"
 with plt.rc_context({"font.size": 8, "axes.labelsize": 8, "axes.titlesize": 8, "xtick.labelsize": 7,
                      "ytick.labelsize": 7, "legend.fontsize": 7, "axes.linewidth": 0.6, "grid.linewidth": 0.4,
                      "xtick.major.width": 0.6, "ytick.major.width": 0.6}):
-    fig = plt.figure(figsize=(AMT_FULL_WIDTH_IN, 7.0), layout="constrained")
-    grid = fig.add_gridspec(3, 2, height_ratios=[1, 1, 2.1])
+    fig = plt.figure(figsize=(AMT_FULL_WIDTH_IN, 6.7), layout="constrained")
+    fig.get_layout_engine().set(w_pad=0.02, wspace=0.0)   # tight columns: the square scatter panels are width-limited
+    # third column only for the colour bar of the scatter plots: the time series span it, i.e. extend
+    # to the right above the colour bar
+    grid = fig.add_gridspec(3, 3, height_ratios=[1, 1, 1.85],
+                            width_ratios=[1, 1, 0.1 if len(uv_sc_gates) > 1 else 0.001])
     ts_axes = [fig.add_subplot(grid[0, :])]
     ts_axes.append(fig.add_subplot(grid[1, :], sharex=ts_axes[0]))
     sc_axes = [fig.add_subplot(grid[2, col]) for col in range(2)]
@@ -2020,12 +2028,14 @@ with plt.rc_context({"font.size": 8, "axes.labelsize": 8, "axes.titlesize": 8, "
         for t0, t1 in removed_spans:
             ax.axvspan(t0, t1, color="0.88", linewidth=0, zorder=0)
         # draw order (zorder): LIDAR, ERA5 at LIDAR site, meteomast, ERA5 at meteomast on top
-        ax.plot(uv_hours, lidar_hourly[var].values, "-", lw=0.6, color=CROSS_STYLES["LIDAR"][0],
+        ax.plot(uv_hours, lidar_hourly[var].values, linestyle="none", marker="o", ms=1.4, markeredgewidth=0,
+                color=UV_FIG_STYLES["LIDAR"][0],
                 label=f"LIDAR, {uv_h_lidar} m, {CROSS_AVG_WINDOW.replace('h', ' h')}", zorder=2)
-        ax.plot(uv_hours, mast_hourly[var].values, "-", lw=0.6, color=CROSS_STYLES["meteomast"][0],
+        ax.plot(uv_hours, mast_hourly[var].values, linestyle="none", marker="o", ms=1.4, markeredgewidth=0,
+                color=UV_FIG_STYLES["meteomast"][0],
                 label=f"meteomast, {uv_h_mast} m, {CROSS_AVG_WINDOW.replace('h', ' h')}", zorder=4)
         for name, (df, h) in era5_uv.items():
-            color, marker = CROSS_STYLES[name]
+            color, marker = UV_FIG_STYLES[name]
             site = "LIDAR site" if name == "ERA5 @LIDAR" else "meteomast"
             ax.plot(uv_hours, df[var], linestyle="none", marker=marker, ms=2.2, color=color,
                     markeredgecolor="white", markeredgewidth=0.2, label=f"ERA5 at {site}, {h} m, 1 h",
@@ -2036,14 +2046,19 @@ with plt.rc_context({"font.size": 8, "axes.labelsize": 8, "axes.titlesize": 8, "
     ts_axes[0].tick_params(labelbottom=False)
     ts_axes[0].set_xlim(uv_period.start, uv_period.stop)
     ts_axes[1].set_xlabel("day")
-    ts_axes[1].xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=12))
-    ts_axes[1].xaxis.set_major_formatter(mdates.ConciseDateFormatter(ts_axes[1].xaxis.get_major_locator()))
+    ts_axes[1].xaxis.set_major_locator(mdates.DayLocator(interval=3))      # full dates need room: every 3rd day
+    ts_axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%Y/%m/%d"))
+    ts_axes[1].xaxis.set_minor_locator(mdates.DayLocator())
     handles, labels = ts_axes[0].get_legend_handles_labels()
     if removed_spans:
         handles.append(plt.Rectangle((0, 0), 1, 1, color="0.88"))
-        labels.append(f"removed by the filter ({len(uv_removed)} of {len(uv_hours)} h)")
-    uv_legend = fig.legend(handles, labels, loc="outside upper center", ncol=3, frameon=False, handlelength=1.5,
-                           columnspacing=1.2, markerscale=1.5)
+        labels.append("discarded by filter")
+    # legend inside panel (a), below the curves: the y range is extended downwards to make room for it
+    u_lo, u_hi = ts_axes[0].get_ylim()
+    ts_axes[0].set_ylim(u_lo - 0.45 * (u_hi - u_lo), u_hi)
+    uv_legend = ts_axes[0].legend(handles, labels, loc="lower center", ncol=3, fontsize=6, handlelength=1.5,
+                                  columnspacing=1.2, markerscale=1.5, framealpha=0.9, edgecolor="none",
+                                  borderpad=0.3)
     for line in uv_legend.get_lines():
         line.set_linewidth(1.5)
 
@@ -2053,34 +2068,47 @@ with plt.rc_context({"font.size": 8, "axes.labelsize": 8, "axes.titlesize": 8, "
     uv_10min_rows = []
     for ax, var in zip(sc_axes, ("u", "v")):
         x, y = uv_sc[f"lidar_{var}"].values, uv_sc[f"era5_{var}"].values
-        st = scatter_with_fit(ax, x, y, f"LIDAR {var}, 10 min {UNIT}",
-                              f"ERA5 {var} at LIDAR site, interpolated in time {UNIT}",
-                              title=f"{var}, four heights, n={int(np.isfinite(x + y).sum())}",
-                              lims=uv_sc_lims, c=uv_sc["gate"].values,
-                              scatter_kw=dict(s=2, alpha=0.6, linewidths=0, cmap=gate_cmap, norm=gate_norm))
-        ax.title.set_fontsize(8)
+        point_style = (dict(c=uv_sc["gate"].values,
+                            scatter_kw=dict(s=2, alpha=0.6, linewidths=0, cmap=gate_cmap, norm=gate_norm))
+                       if len(uv_sc_gates) > 1 else
+                       dict(scatter_kw=dict(s=2, alpha=0.5, linewidths=0, color=UV_FIG_STYLES["LIDAR"][0])))
+        st = scatter_with_fit(ax, x, y, f"LIDAR {var} {UNIT}", f"ERA5 {var} {UNIT}",
+                              lims=uv_sc_lims, **point_style)
+        ax.set_title("")                                   # no panel title: the statistics go into the legend
         for line in ax.lines:
             line.set_linewidth(0.8)
         ax.set_aspect("equal", adjustable="box")          # square panel, same scale on both axes
+        ax.set_anchor("N")                                # spare height of the row goes below, not above
         ax.set_xlim(*uv_sc_lims)
         ax.set_ylim(*uv_sc_lims)
         for axis in (ax.xaxis, ax.yaxis):                 # same ticks on both axes
             axis.set_major_locator(plt.MultipleLocator(5))
-        ax.legend(loc="lower right", fontsize=6, handlelength=1.5)
+        sc_handles, sc_labels = ax.get_legend_handles_labels()
+        sc_handles.append(plt.Line2D([], [], linestyle="none"))
+        sc_labels.append(f"r = {st['r']:.2f}, RMSE = {st['rmse']:.2f} m s$^{{-1}}$\n"
+                         f"bias = {st['bias']:.2f} m s$^{{-1}}$")
+        ax.legend(sc_handles, sc_labels, loc="lower right", fontsize=6, handlelength=1.5)
         stat_keys = ("n", "r", "rmse", "bias", "slope", "intercept")
         uv_10min_rows.append(dict(variable=var, height="all", **{k: st[k] for k in stat_keys}))
         for gate_index, h_gate in enumerate(uv_sc_gates):
             g = uv_sc["gate"].values == gate_index
             st_gate = orthogonal_fit_stats(x[g], y[g])
             uv_10min_rows.append(dict(variable=var, height=h_gate, **{k: st_gate[k] for k in stat_keys}))
-    uv_colorbar = fig.colorbar(ScalarMappable(norm=gate_norm, cmap=gate_cmap), ax=sc_axes,
-                               ticks=range(len(uv_sc_gates)), shrink=0.8, pad=0.02)
-    uv_colorbar.ax.set_yticklabels(uv_sc_gates)
-    uv_colorbar.set_label("LIDAR height (m)")
     for ax, letter in zip([*ts_axes, *sc_axes], "abcd"):
         ax.text(0.005 if ax in ts_axes else 0.02, 0.97, f"({letter})", transform=ax.transAxes, va="top",
                 ha="left", fontsize=8, fontweight="bold",
                 bbox=dict(facecolor="white", edgecolor="none", pad=1) if ax in ts_axes else None)
+    if len(uv_sc_gates) > 1:
+        # colour bar added after the layout is frozen, in the room the empty third grid column keeps free:
+        # thin, 80 % as tall as panel (d) and centred on it
+        fig.canvas.draw()
+        fig.set_layout_engine("none")
+        sc_pos = sc_axes[1].get_position()
+        uv_cax = fig.add_axes([sc_pos.x1 + 0.02, sc_pos.y0 + 0.1 * sc_pos.height, 0.015, 0.8 * sc_pos.height])
+        uv_colorbar = fig.colorbar(ScalarMappable(norm=gate_norm, cmap=gate_cmap), cax=uv_cax,
+                                   ticks=range(len(uv_sc_gates)))
+        uv_colorbar.ax.set_yticklabels(uv_sc_gates)
+        uv_colorbar.set_label("LIDAR height (m)", labelpad=2)
     if SAVE_FIG_DIR is not None:       # vector version for the journal
         SAVE_FIG_DIR.mkdir(parents=True, exist_ok=True)
         fig.savefig(SAVE_FIG_DIR / f"era5_mast_lidar_uv_timeseries_10min_{uv_h_mast:03d}m{cross_tag}.pdf")
