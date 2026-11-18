@@ -43,10 +43,24 @@ def _detrend_rows(image, seconds):
     return image - y_mean - slope * (x - x_mean)
 
 
+def _level_excess(ref_image, ref_noise, level):
+    """Mean over the rows of (row mean of ref_image - level) / ref_noise: how far the reference lies above
+    `level` (one value per row), in units of the noise of a single measurement of the reference."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z = (np.nanmean(ref_image, axis=1) - np.asarray(level, dtype=float)) / ref_noise
+    return float(np.nanmean(z))
+
+
+def level_check_settings(edge_seconds=30, max_sigma_edge=None, max_sigma_other_ref=None):
+    """Settings of the reference level check (find_reference_window), as a dict; None switches a check off."""
+    return dict(edge_seconds=edge_seconds, max_sigma_edge=max_sigma_edge, max_sigma_other_ref=max_sigma_other_ref)
+
+
 def find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, direction="up",
                           start_offset=3, ref_search_minutes=60, ref_window_minutes=1,
                           ref_min_span_seconds=40, ref_min_count=100, other_ship_minutes=5,
-                          ztest_p_threshold=0.15, ztest_min_cluster_size=20, other_ship_min_length_m=None):
+                          ztest_p_threshold=0.15, ztest_min_cluster_size=20, other_ship_min_length_m=None,
+                          edge_window=None, other_ref_level=None, level_check=None):
     """Searches a clean reference window of `ref_window_minutes` before (direction="up") or
     after (direction="down") the ship pass at `t`, stepping 30 s per rejected try from `start_offset`
     up to `ref_search_minutes`. `start_offset` is the distance of the window start from `t`
@@ -59,9 +73,26 @@ def find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, di
     measurements covering at least `ref_min_span_seconds`, and the z-test finds no plume in it
     (tested on the dSCDs minus the linear trend of each row, so that drifts do not count as plume).
 
-    Returns (window_ref, ref_start, ref_end) with window_ref a boolean mask over measurement_times,
-    or None if no clean window was found.
+    Optional level check (level_check, see level_check_settings; catches plumes that raise the whole
+    reference window evenly, e.g. of ships without AIS, which the z-test misses): the reference is rejected
+    if its NO2 dSCD level lies more than level_check["max_sigma_edge"] above the mean of the measurements
+    in `edge_window` (the plume window edge next to the reference), or more than
+    level_check["max_sigma_other_ref"] above `other_ref_level` (mean per row of the other reference). The
+    excess is the mean over the rows of (difference / noise), noise = std of the detrended reference
+    measurements of each row (single measurement). One-sided: a reference lying below the edge or the
+    other reference is not rejected (then the plume is in the edge / the other reference, not in this one).
+
+    Returns (window_ref, ref_start, ref_end, levels) with window_ref a boolean mask over measurement_times
+    and levels = {"edge_sigma": ..., "other_ref_sigma": ...} (NaN if not checked), or None if no clean
+    window was found.
     """
+    level_check = level_check or {}
+    max_edge, max_other = level_check.get("max_sigma_edge"), level_check.get("max_sigma_other_ref")
+    edge_level = None
+    if max_edge is not None and edge_window is not None and np.any(edge_window):
+        edge_level = np.nanmean(ds_impact["a[NO2]"].isel(dim_0=edge_window).transpose("viewing_direction", "dim_0").values, axis=1)
+    if max_other is None:
+        other_ref_level = None
     other = ship_passes["MMSI"] != mmsi
     if other_ship_min_length_m is not None and "Length_in_m" in ship_passes:
         length = pd.to_numeric(ship_passes["Length_in_m"], errors="coerce")
@@ -105,11 +136,34 @@ def find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, di
         # trend of each row, so that a smoothly rising or falling background is not taken for a plume
         no2_ref = ds_impact["a[NO2]"].isel(dim_0=window_ref).transpose("viewing_direction", "dim_0").values
         seconds = (ref_times - ref_times[0]).total_seconds().to_numpy()
-        mask = SEICOR.plumes.detect_plume_ztest(_detrend_rows(no2_ref, seconds),
+        detrended = _detrend_rows(no2_ref, seconds)
+        mask = SEICOR.plumes.detect_plume_ztest(detrended,
                                                 p_threshold=ztest_p_threshold, min_cluster_size=ztest_min_cluster_size)
-        if mask.sum() == 0:
-            return window_ref, ref_start, ref_end
+        if mask.sum() != 0:
+            continue
+        # level check against the plume window edge and the other reference
+        levels = {"edge_sigma": np.nan, "other_ref_sigma": np.nan}
+        if edge_level is not None or other_ref_level is not None:
+            noise = np.nanstd(detrended, axis=1)
+            if edge_level is not None:
+                levels["edge_sigma"] = _level_excess(no2_ref, noise, edge_level)
+                if levels["edge_sigma"] > max_edge:
+                    continue
+            if other_ref_level is not None:
+                levels["other_ref_sigma"] = _level_excess(no2_ref, noise, other_ref_level)
+                if levels["other_ref_sigma"] > max_other:
+                    continue
+        return window_ref, ref_start, ref_end, levels
     return None
+
+
+def _edge_window(measurement_times, t, window_minutes, side, edge_seconds):
+    """Boolean mask of the first (side="start") or last (side="end") edge_seconds of the plume window."""
+    start = t - pd.Timedelta(minutes=window_minutes[0])
+    end = t + pd.Timedelta(minutes=window_minutes[1])
+    if side == "start":
+        return (measurement_times >= start) & (measurement_times < start + pd.Timedelta(seconds=edge_seconds))
+    return (measurement_times >= end - pd.Timedelta(seconds=edge_seconds)) & (measurement_times < end)
 
 def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passes,
                                     window_minutes=(1, 3), ref_search_minutes=60,
@@ -117,7 +171,7 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
                                     ref_min_count=100, do_lp=False, df_lp_310=None, df_lp_365=None,
                                     ref_start_offset=3, other_ship_minutes=5,
                                     ref_ztest_p_threshold=0.15, ref_ztest_min_cluster_size=20,
-                                    other_ship_min_length_m=None):
+                                    other_ship_min_length_m=None, level_check=None):
     """Subtracts background for a single ship pass (row from ship_passes).
 
     This variant enforces minimum quality for the chosen reference window: it must
@@ -144,11 +198,14 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
                                    other_ship_minutes=other_ship_minutes,
                                    other_ship_min_length_m=other_ship_min_length_m,
                                    ztest_p_threshold=ref_ztest_p_threshold,
-                                   ztest_min_cluster_size=ref_ztest_min_cluster_size)
+                                   ztest_min_cluster_size=ref_ztest_min_cluster_size,
+                                   edge_window=_edge_window(measurement_times, t, window_minutes, "start",
+                                                            (level_check or {}).get("edge_seconds", 30)),
+                                   level_check=level_check)
     if upwind is None:
         print(f"No clean reference window found for MMSI {mmsi} at {t}")
         return None
-    window_ref, ref_start, ref_end = upwind
+    window_ref, ref_start, ref_end, up_levels = upwind
     ref_found = True
 
     no2_enhancement = ds_impact["a[NO2]"].isel(dim_0=window) - ds_impact["a[NO2]"].isel(dim_0=window_ref).mean(dim="dim_0")
@@ -185,6 +242,7 @@ def upwind_constant_background_enh(row, ds_impact, measurement_times, ship_passe
             t=str(t),
             plume_number=str(row["Plume_number"]),
             ref_found=str(ref_found),
+            ref_up_edge_sigma=up_levels["edge_sigma"],
         ),
     )
     ds["vea"] = np.round(ds.vea - 90.0, 1)
@@ -278,7 +336,7 @@ def upwind_downwind_interp_background_enh(ds, row,
                                           ref_min_span_seconds=40, ref_min_count=100,
                                           ref_start_offset=3, other_ship_minutes=5,
                                           ref_ztest_p_threshold=0.15, ref_ztest_min_cluster_size=20,
-                                          other_ship_min_length_m=None):
+                                          other_ship_min_length_m=None, level_check=None):
     """
     Subtracts a background interpolated in time between an upwind and a downwind reference
     window for a single ship pass (row from ship_passes).
@@ -301,7 +359,8 @@ def upwind_downwind_interp_background_enh(ds, row,
                          ref_min_span_seconds=ref_min_span_seconds, ref_min_count=ref_min_count,
                          other_ship_minutes=other_ship_minutes, other_ship_min_length_m=other_ship_min_length_m,
                          ztest_p_threshold=ref_ztest_p_threshold,
-                         ztest_min_cluster_size=ref_ztest_min_cluster_size)
+                         ztest_min_cluster_size=ref_ztest_min_cluster_size, level_check=level_check)
+    edge_seconds = (level_check or {}).get("edge_seconds", 30)
 
     if ds is None:
         ds = xr.Dataset(
@@ -323,11 +382,13 @@ def upwind_downwind_interp_background_enh(ds, row,
         # upwind reference ends ref_start_offset minutes before the start of the plume window
         upwind = find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, direction="up",
                                        start_offset=window_minutes[0] + ref_start_offset + ref_window_minutes,
+                                       edge_window=_edge_window(measurement_times, t, window_minutes, "start", edge_seconds),
                                        **search_kwargs)
         if upwind is None:
             print(f"No clean upwind reference window found for MMSI {mmsi} at {t}")
             return ds
         window_ref = upwind[0]
+        ds.attrs["ref_up_edge_sigma"] = upwind[3]["edge_sigma"]
         ds = ds.assign_coords(window_ref=ds_impact["dim_0"].isel(dim_0=window_ref).values)
         ds = ds.assign(
             no2_ref=(["image_row", "window_ref"], ds_impact["a[NO2]"].isel(dim_0=window_ref).values),
@@ -337,12 +398,17 @@ def upwind_downwind_interp_background_enh(ds, row,
         ds.attrs["ref_found"] = "True"
 
     # Downwind reference: starts ref_start_offset minutes after the end of the plume window
+    up_level = ds_impact["a[NO2]"].isel(dim_0=window_ref).transpose("viewing_direction", "dim_0").values
     downwind = find_reference_window(t, mmsi, ds_impact, measurement_times, ship_passes, direction="down",
-                                     start_offset=window_minutes[1] + ref_start_offset, **search_kwargs)
+                                     start_offset=window_minutes[1] + ref_start_offset,
+                                     edge_window=_edge_window(measurement_times, t, window_minutes, "end", edge_seconds),
+                                     other_ref_level=np.nanmean(up_level, axis=1), **search_kwargs)
     if downwind is None:
         print(f"No clean downwind reference window found for MMSI {mmsi} at {t}")
         return ds
     downwind_window_ref = downwind[0]
+    ds.attrs["ref_down_edge_sigma"] = downwind[3]["edge_sigma"]
+    ds.attrs["ref_down_other_ref_sigma"] = downwind[3]["other_ref_sigma"]
 
 
     up_mean = ds_impact["a[NO2]"].isel(dim_0=window_ref).mean(dim="dim_0")

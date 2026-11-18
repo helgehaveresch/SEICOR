@@ -77,6 +77,11 @@ PASS_KEY = "20250520_063128"   # pass time as in the plume file names, YYYYMMDD_
 # PASS_KEY = "20250511_184437"  # 11.05.25 18:44, AMADEA (247 m, MMSI 308445000), small ship signal, compact plume 0-10 deg
 # PASS_KEY = "20250501_162854"  # 01.05.25 16:28, AIDALUNA (292 m, MMSI 247255400), strong vertical plume, weak ship
 
+# a pass key on the command line overrides PASS_KEY: python3 plot_processing_steps.py 20250520_063128
+_cli_keys = [a for a in sys.argv[1:] if len(a) == 15 and a[8] == "_" and a.replace("_", "").isdigit()]
+if _cli_keys:
+    PASS_KEY = _cli_keys[0]
+
 MMSI = None                     # only needed if several ships pass in the same second
 # MMSI = "356582000"
 
@@ -117,11 +122,12 @@ PLOT_O4 = True                  # last panel: O4 enhancement with the plume and 
 # PLOT_O4 = False
 PLOT_OLD = True                 # panel next to (b): NO2 enhancement of the ship from the old retrieval (SLANT_old)
 # PLOT_OLD = False
-OLD_SC_PATH = "IMPACT/SLANT_old/SLANT_{yy}"  # relative to the base path, month folder is added (as IMPACT_SC_path)
-OLD_SC_FILE_ENDING = "ID.NO2_VIS_zenith"     # old product (zenith reference)
+OLD_SC_PATH = "IMPACT/SLANT_pc_old/SLANT_{yy}"  # relative to the base path, month folder is added (as IMPACT_SC_path)
+OLD_SC_FILE_ENDING = "ID.NO2_VIS_daily_ref"  # same product as the current data, from the old pc files
+# OLD_SC_PATH, OLD_SC_FILE_ENDING = "IMPACT/SLANT_old/SLANT_{yy}", "ID.NO2_VIS_zenith"  # old product (zenith reference, old LOS calibration)
 # OLD_SC_FILE_ENDING = "ID.NO2_VIS_fix_destriped_ref_250907"
-OLD_EXTRA_DROP = 1              # viewing directions dropped in addition to those below image_row.min() of the plume file
-# the old panel shows the time range of the plume window and labels the rows with the elevations of the plume file
+# the old panel shows the time range of the plume window; the lowest viewing directions are dropped as in the current
+# data (Instruments/drop_lowest_viewing_directions) and the elevations are LOS - 90 of the old files, rounded to 0.1 deg
 O4_STORED = 1e40                # unit of the O4 columns as stored (fit output; check against the cross section scaling)
 O4_E = 1e43                     # display unit of the O4 columns
 O4_UNIT = "10$^{43}$ molec.$^2$ cm$^{-5}$"
@@ -153,9 +159,16 @@ def load_camera_image(settings, t, crop=None):
     from SEICOR.video_camera import parse_img_time
     date = t.strftime("%y%m%d")
     img_dir = Path(settings["base_paths"][PLAT_KEY]) / settings["Instruments"]["img_dir"]
-    zip_path, dir_path = img_dir / f"{date}_video.zip", img_dir / f"{date}_video"
-    if zip_path.is_file():
-        zf = zipfile.ZipFile(zip_path)
+    dir_path = img_dir / f"{date}_video"
+    zf = None
+    for zip_path in (img_dir / f"{date}_video.zip", img_dir / f"{date}_video_fix.zip"):  # _fix: repaired copy of a broken zip
+        if zip_path.is_file():
+            try:
+                zf = zipfile.ZipFile(zip_path)
+                break
+            except zipfile.BadZipFile:
+                warnings.warn(f"broken zip file {zip_path}")
+    if zf is not None:
         names = [n for n in zf.namelist() if n.lower().endswith(".jpg")]
         read = zf.read
     elif dir_path.is_dir():
@@ -182,13 +195,13 @@ def load_camera_image(settings, t, crop=None):
 def load_old_slant(settings, t_start, t_end):
     """NO2 dSCDs of the old retrieval (OLD_SC_PATH, OLD_SC_FILE_ENDING) between t_start and t_end (UTC) for all
     rows (viewing directions, 0-based: file 01 -> row 0); zenith spectra (LOS 180) are dropped. vea is LOS - 90 of
-    the old files (old calibration). Returns (times as DatetimeIndex, vea per row, no2 [row, time]) or None.
+    the old files, rounded to 0.1 deg as in the plume files. Returns (times as DatetimeIndex, vea per row, no2 [row, time]) or None.
     Reading the 47 MB files is slow, so the result is cached as .npz in <plots_out_dir>/processing_steps/."""
     from imaging_tools.utilities import get_month_folder
     date = t_start.strftime("%y%m%d")
     base = Path(settings["base_paths"][PLAT_KEY])
     cache = (base / settings["Output"]["plots_out_dir"] / "processing_steps"
-             / f"old_{OLD_SC_FILE_ENDING}_{t_start:%Y%m%d_%H%M%S}_{t_end:%H%M%S}_all.npz")
+             / f"old_{Path(OLD_SC_PATH).parent.name}_{OLD_SC_FILE_ENDING}_{t_start:%Y%m%d_%H%M%S}_{t_end:%H%M%S}_all.npz")
     if cache.is_file():
         c = np.load(cache)
         return pd.DatetimeIndex(c["times"]).tz_localize("UTC"), c["vea"], c["no2"]
@@ -207,7 +220,7 @@ def load_old_slant(settings, t_start, t_end):
         d, t = d[sel], t[sel]
         if not len(d):
             break
-        v = float(np.median(d.los)) - 90
+        v = round(float(np.median(d.los)) - 90, 1)
         if times is None:
             times = t
         # rows of one image share the time stamp; align to the first row in case single spectra are missing
@@ -461,12 +474,9 @@ def make_figure(ds, settings, factor, elevations=ELEVATIONS):
         res = settings["processing"]["coarsen"]["time_resolution_seconds"]
         if res:
             t_old, no2_old = bin_in_time(t_old, no2_old, res)
-        # drop the lowest viewing directions as in the plume file plus OLD_EXTRA_DROP more; the rows are labelled
-        # with the elevations of the plume file (current calibration), so they match the other panels
-        row_old = np.arange(len(vea_old))
-        keep = (row_old >= rows.min() + OLD_EXTRA_DROP) & np.isin(row_old, rows)
-        no2_old = no2_old[keep]
-        vea_old = np.array([vea[rows == r][0] for r in row_old[keep]])
+        # drop the lowest viewing directions as in the current data; elevations of the old files themselves
+        n_drop = settings["Instruments"].get("drop_lowest_viewing_directions", 0) or 0
+        no2_old, vea_old = no2_old[n_drop:], vea_old[n_drop:]
         m_old = minutes(t_old)
         in_ref = (m_old >= m_up[0] - 1e-3) & (m_old <= m_up[-1] + 1e-3)
         enh_old = (no2_old - np.nanmean(no2_old[:, in_ref], axis=1, keepdims=True)) / E

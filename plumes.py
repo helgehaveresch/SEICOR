@@ -148,6 +148,29 @@ def _local_nanmean(arr, footprint):
         return total / count
 
 
+def _footprint(arm):
+    """Neighbourhood footprint of the z-test and the mask smoothing (rows = viewing directions, columns = time).
+
+    arm int n: cross with arms of n pixels (the original shape), e.g. 1 -> 5 pixels.
+    arm [n_rows, n_cols]: rectangle of 2*n_rows+1 rows by 2*n_cols+1 columns without its four corner pixels,
+    i.e. extended in time, e.g. [1, 2] -> 3 x 5 rectangle minus the corners = 11 pixels:
+        . x x x .
+        x x x x x
+        . x x x .
+    """
+    if np.ndim(arm) == 0:
+        n = int(arm)
+        footprint = np.zeros((2 * n + 1, 2 * n + 1), dtype=bool)
+        footprint[n, :] = True
+        footprint[:, n] = True
+        return footprint
+    n_rows, n_cols = (int(a) for a in arm)
+    footprint = np.ones((2 * n_rows + 1, 2 * n_cols + 1), dtype=bool)
+    if n_rows > 0 and n_cols > 0:
+        footprint[[0, 0, -1, -1], [0, -1, 0, -1]] = False
+    return footprint
+
+
 def _merge_nearby_clusters(labeled, keep_labels, seed_label, seconds, max_gap_seconds, max_row_distance, max_extension_seconds=None):
     """Give seed_label to the clusters connected to it: on rows at most max_row_distance apart, they are
     at most max_gap_seconds apart in time (seconds: time of each column), also as a chain over other clusters.
@@ -221,16 +244,8 @@ def _detect_plume_ztest_core(
     if exclude_mask is not None:
         image = np.where(np.asarray(exclude_mask, dtype=bool), np.nan, np.asarray(image, dtype=float))
 
-    # build cross-shaped footprint for neighborhood mean
-    size = 2 * kernel_arm + 1
-    footprint = np.zeros((size, size), dtype=bool)
-    c = kernel_arm
-    footprint[c, c] = True
-    for a in range(1, kernel_arm + 1):
-        footprint[c + a, c] = True
-        footprint[c - a, c] = True
-        footprint[c, c + a] = True
-        footprint[c, c - a] = True
+    # footprint of the neighborhood mean: cross (kernel_arm int) or rectangle extended in time ([rows, cols])
+    footprint = _footprint(kernel_arm)
 
     neigh_mean = _local_nanmean(image, footprint)
 
@@ -242,20 +257,16 @@ def _detect_plume_ztest_core(
     if exclude_mask is not None:
         mask &= ~np.asarray(exclude_mask, dtype=bool)  # the neighborhood mean of an excluded pixel is still defined
 
+    # smooth the mask with a median (majority) filter before the clusters are selected: removes single pixels and
+    # thin spurs, fills small gaps. Footprint: median_kernel_arm (int: cross, [rows, cols]: rectangle without
+    # corners); None = the cross one pixel larger than a kernel_arm cross, or the same shape as a [rows, cols] kernel
     if median_kernel_arm is None:
-        median_kernel_arm = kernel_arm + 1
-    size_m = 2 * median_kernel_arm + 1
-    footprint_m = np.zeros((size_m, size_m), dtype=bool)
-    cm = median_kernel_arm
-    footprint_m[cm, cm] = True
-    for a in range(1, median_kernel_arm + 1):
-        footprint_m[cm + a, cm] = True
-        footprint_m[cm - a, cm] = True
-        footprint_m[cm, cm + a] = True
-        footprint_m[cm, cm - a] = True
-
-    #mask_smoothed = ndimage.median_filter(mask.astype(np.uint8), footprint=footprint_m, mode="constant", cval=0)
-    #mask = mask_smoothed.astype(bool)
+        median_kernel_arm = kernel_arm + 1 if np.ndim(kernel_arm) == 0 else kernel_arm
+    footprint_m = _footprint(median_kernel_arm)
+    mask = ndimage.median_filter(mask.astype(np.uint8), footprint=footprint_m, mode="constant", cval=0).astype(bool)
+    mask &= ~np.isnan(pvals)  # no plume pixels where there is no data
+    if exclude_mask is not None:
+        mask &= ~np.asarray(exclude_mask, dtype=bool)  # smoothing must not fill the ship back in
 
     labeled, ncomp = ndimage.label(mask, structure=ndimage.generate_binary_structure(2, connectivity))
     if ncomp == 0:
@@ -510,6 +521,17 @@ def detect_plume_ztest_iterative(
 
     no_mask = np.zeros(image.shape, dtype=bool)
 
+    # the ship is searched in the time window of the source region (time_tol_seconds before to time_after_seconds
+    # after the pass, all rows): only dark clusters overlapping it count, so a dark structure (another ship, a cloud)
+    # elsewhere in the window cannot become the ship mask
+    ship_search = None
+    if ds_plume is not None and "times_plume" in ds_plume and ds_plume.attrs.get("t") is not None:
+        s_rel = (pd.to_datetime(ds_plume["times_plume"].values, utc=True)
+                 - pd.to_datetime(ds_plume.attrs.get("t"), utc=True)).total_seconds().values
+        after_s = time_tol_seconds if time_after_seconds is None else time_after_seconds
+        if s_rel.size == image.shape[1]:
+            ship_search = np.broadcast_to(((s_rel >= -time_tol_seconds) & (s_rel <= after_s))[None, :], image.shape)
+
     def _initial_stats(excluded):
         est_mean, est_std = _bg_stats(excluded)
         return (est_mean if bg_mean is None else bg_mean), (est_std if bg_std is None else bg_std)
@@ -526,21 +548,18 @@ def detect_plume_ztest_iterative(
     ship_masks = []
 
     for i in range(max(int(max_iter), 1)):
-        # ship first, so that its pixels can be left out of the plume test
-        ship_mask = np.asarray(detect_plume_ztest_left(
-            image,
-            bg_mean=current_bg_mean,
-            bg_std=current_bg_std,
-            p_threshold=ship_p_threshold,
-            min_cluster_size=ship_min_cluster_size,
-            kernel_arm=ship_kernel_arm,
-            median_kernel_arm=ship_median_kernel_arm,
-            connectivity=ship_connectivity,
-        ), dtype=bool)
+        # ship first, so that its pixels can be left out of the plume test. All dark clusters (dark_mask: the ship,
+        # other ships, dark structures) stay out of the background statistics and the plume test; the ship mask is
+        # the largest of them that overlaps the time window of the source region (ship_search)
+        ship_kw = dict(bg_mean=current_bg_mean, bg_std=current_bg_std, p_threshold=ship_p_threshold,
+                       min_cluster_size=ship_min_cluster_size, kernel_arm=ship_kernel_arm,
+                       median_kernel_arm=ship_median_kernel_arm, connectivity=ship_connectivity)
+        dark_mask = np.asarray(detect_plume_ztest_left(image, keep_all=True, **ship_kw), dtype=bool)
+        ship_mask = np.asarray(detect_plume_ztest_left(image, search_mask=ship_search, **ship_kw), dtype=bool)
         if i == 0 and bg_offset_from_window:
-            current_bg_mean = np.nanmedian(image[~ship_mask])  # background level of this image, robust to the plume
-        elif i == 0 and estimate_initial and ship_mask.any():
-            current_bg_mean, current_bg_std = _initial_stats(ship_mask)  # statistics without the ship pixels
+            current_bg_mean = np.nanmedian(image[~dark_mask])  # background level of this image, robust to the plume
+        elif i == 0 and estimate_initial and dark_mask.any():
+            current_bg_mean, current_bg_std = _initial_stats(dark_mask)  # statistics without the dark pixels
         plume_mask = np.asarray(_detect_plume_ztest_core(
             image,
             bg_mean=current_bg_mean,
@@ -563,9 +582,9 @@ def detect_plume_ztest_iterative(
             merge_min_cluster_size=merge_min_cluster_size,
             merge_max_cluster_size=merge_max_cluster_size,
             merge_max_extension_minutes=merge_max_extension_minutes,
-            exclude_mask=ship_mask,
+            exclude_mask=dark_mask,
         ), dtype=bool)
-        final_mask = plume_mask | ship_mask
+        final_mask = plume_mask | dark_mask  # excluded from the re-estimated background
         plume_masks.append(plume_mask.copy())
         ship_masks.append(ship_mask.copy())
 
@@ -610,6 +629,7 @@ def plume_mask_of(ds, plume_mask_settings):
         min_cluster_size=plume_mask_settings["min_cluster_size"],
         connectivity=plume_mask_settings["connectivity"],
         kernel_arm=plume_mask_settings["kernel_arm"],
+        median_kernel_arm=plume_mask_settings.get("median_kernel_arm"),
         require_connection=plume_mask_settings["require_connection"],
         ds_plume=ds,
         time_tol_seconds=plume_mask_settings.get("source_seconds_before", 60),
@@ -697,9 +717,14 @@ def detect_plume_ztest_left(
     kernel_arm=0,
     median_kernel_arm=None,
     connectivity=1,
+    search_mask=None,
+    keep_all=False,
 ):
     """
     Left-sided neighborhood Z-test to detect negative enhancements.
+    search_mask (bool image, optional): only clusters that overlap it are candidates; the largest of them is
+    returned with its full extent (also the pixels outside search_mask).
+    keep_all: return all clusters of at least min_cluster_size instead of the largest one.
     H0: neigh_mean >= bg_mean
     H1: neigh_mean < bg_mean
     Reject H0 when p <= p_threshold (p = CDF(z)).
@@ -758,11 +783,16 @@ def detect_plume_ztest_left(
 
     sizes = ndimage.sum(mask, labeled, range(1, ncomp + 1))
     keep_labels = [i + 1 for i, s in enumerate(sizes) if s >= min_cluster_size]
+    if search_mask is not None:
+        in_search = set(np.unique(labeled[np.asarray(search_mask, dtype=bool) & (labeled > 0)]))
+        keep_labels = [lab for lab in keep_labels if lab in in_search]
     if not keep_labels:
         #print("no ship pixels detected after filtering")
         return np.zeros_like(mask, dtype=bool)
 
     mask_filtered = np.isin(labeled, keep_labels)
+    if keep_all:
+        return mask_filtered
     sizes_keep = [(lab, s) for lab, s in zip(range(1, ncomp + 1), sizes) if (lab in keep_labels)]
     largest_label = max(sizes_keep, key=lambda x: x[1])[0]
     final_mask = (labeled == largest_label)

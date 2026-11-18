@@ -1729,8 +1729,9 @@ def plot_enhancement_impact_and_insitu(
     plt.savefig(os.path.join(no2_out_dir, f"NO2_enhancement_vmr_{date}.png"))
 
 
-def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
-    """Plot NO2 enhancement using pcolormesh with time on the x-axis and save to disk.
+def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date, ship_mask=None):
+    """Plot NO2 enhancement using pcolormesh with time on the x-axis and save to disk, with the contour of the plume
+    mask (C_PLUME) and, if given, of the ship mask (C_SHIP).
 
     The function will try to find a time coordinate inside `ds_plume` by looking
     for names in `time_coord_names`. If a matching coordinate is found and its
@@ -1757,6 +1758,11 @@ def plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date,):
     # contour needs x coords for proper alignment; use mesh coordinates
     Xc, Yc = np.meshgrid((xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0)
     ax.contour(Xc, Yc, expand_gap_columns(mask, columns), levels=[0.5], colors=C_PLUME, linewidths=1.5)
+    handles = [Line2D([], [], color=C_PLUME, lw=1.5, label="plume mask")]
+    if ship_mask is not None and np.asarray(ship_mask).any():
+        ax.contour(Xc, Yc, expand_gap_columns(np.asarray(ship_mask), columns), levels=[0.5], colors=C_SHIP, linewidths=1.5)
+        handles.append(Line2D([], [], color=C_SHIP, lw=1.5, label="ship mask"))
+    ax.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.85)
 
     ax.xaxis_date()
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())

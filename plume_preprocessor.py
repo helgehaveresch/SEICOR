@@ -126,6 +126,7 @@ reference_search_kwargs = dict(                     # passed to both enhancement
     other_ship_min_length_m=ref_settings.get("other_ship_min_length_m"),
     ref_ztest_p_threshold=ref_settings["ztest_p_threshold"],
     ref_ztest_min_cluster_size=ref_settings["ztest_min_cluster_size"],
+    level_check=SEICOR.enhancements.level_check_settings(**(ref_settings.get("level_check") or {})),
 )
 detection_settings      = processing_settings["detection"]
 plume_mask_settings     = processing_settings["plume_mask"]
@@ -315,7 +316,7 @@ for pos, (idx, ship_pass_single) in enumerate(ship_passes.iterrows()):
 
         if settings["Plotting"]["generate_plots"]:
             try:  # a failing plot (e.g. a file that cannot be written) must not stop the processing
-                SEICOR.plotting.plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date)
+                SEICOR.plotting.plot_no2_enhancement_with_plume_mask(ds_plume, mask, out_dir, date, ship_mask=ship_mask)
                 SEICOR.plotting.plot_reference_image_with_plume_mask(
                     ds_plume, out_dir, date, min_cluster_size=SEICOR.impact.scale_count(30, coarsen_factor))
             except Exception as e:

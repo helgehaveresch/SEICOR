@@ -1,19 +1,25 @@
-"""Parameter study of the plume detection (plumes.sort_plumes): run plume_preprocessor.py for the 20 test days of
-run_plume_preprocessor_test.py with every combination of
+"""Parameter study of the plume detection (plumes.sort_plumes): run plume_preprocessor.py for test days of
+run_plume_preprocessor_test.py with every combination of the parameters of one round (ROUNDS):
 
-    processing/detection/p_threshold_plume:      0.01, 0.015, 0.02, 0.025
-    processing/detection/plume_min_cluster_size: 5, 10, 15, 20, 25   (raw measurements, scaled with the coarsening)
+    round1  p_threshold_plume 0.01, 0.015, 0.02, 0.025 x plume_min_cluster_size 5, 10, 15, 20, 25,
+            p_threshold_ship 0.02, ship_min_cluster_size 10; 20 days
+    round2  p_threshold_plume 0.01, 0.015, 0.02, 0.025 x plume_min_cluster_size 10, 20, 40, 60, 80
+            x p_threshold_ship 0.015, 0.01, ship_min_cluster_size 20; 20 days
+    round3  ship test: p_threshold_ship 0.005, 0.0075, 0.01 x ship_min_cluster_size 40, 50, 60, plume test as in the
+            settings file; every second test day (10 days)
+(cluster sizes in raw measurements, scaled with the coarsening). Parameters a round does not set are those of
+plume_preprocessor_settings.yaml at the time of the run (written to settings.yaml of every combination).
 
-All other settings are those of plume_preprocessor_settings.yaml. The results go to
-<base>/<STUDY_DIR>/p<p>_mcs<n>/{analysis,plumes,ship_passes}, one folder per combination, each with the settings
-file it was run with (settings.yaml) and one log per day (logs/<date>.log). The coarsened IMPACT data and the ship
+The results go to <base>/<STUDY_DIR>/<combination>/{analysis,plumes,ship_passes}, one folder per combination
+(names: combo_name), each with the settings file it was run with (settings.yaml) and one log per day
+(logs/<date>.log). The coarsened IMPACT data and the ship
 images do not depend on the detection and are written once to <base>/<STUDY_DIR>/{IMPACT_coarsened,video}.
 
 Each worker runs one day for all combinations one after the other, so the same day never runs twice at the same
 time (the shared IMPACT_coarsened/video files are never written concurrently).
 
 Usage, in the background and detached from the terminal:
-    setsid nohup python3 run_detection_study.py > detection_study_run_$(date +%y%m%d_%H%M).log 2>&1 &
+    setsid nohup python3 run_detection_study.py round3 > detection_study_round3_$(date +%y%m%d_%H%M).log 2>&1 &
 """
 import itertools
 import multiprocessing
@@ -30,23 +36,41 @@ from run_plume_preprocessor_test import TEST_DATES
 HERE = Path(__file__).resolve().parent
 SETTINGS = HERE / "plume_preprocessor_settings.yaml"
 STUDY_DIR = "parameter_study_detection"  # relative to the base path of the settings
-P_THRESHOLDS = [0.01, 0.015, 0.02, 0.025]
-MIN_CLUSTER_SIZES = [5, 10, 15, 20, 25]
+# parameters of each round: lists of values per detection setting (None: value of the settings file), days
+ROUNDS = {
+    "round1": dict(p_threshold_plume=[0.01, 0.015, 0.02, 0.025], plume_min_cluster_size=[5, 10, 15, 20, 25],
+                   p_threshold_ship=[0.02], ship_min_cluster_size=[10], dates=TEST_DATES),
+    "round2": dict(p_threshold_plume=[0.01, 0.015, 0.02, 0.025], plume_min_cluster_size=[10, 20, 40, 60, 80],
+                   p_threshold_ship=[0.015, 0.01], ship_min_cluster_size=[20], dates=TEST_DATES),
+    "round3": dict(p_threshold_plume=[None], plume_min_cluster_size=[None],
+                   p_threshold_ship=[0.005, 0.0075, 0.01], ship_min_cluster_size=[40, 50, 60], dates=TEST_DATES[::2]),
+}
+SHIP_DEFAULT = 0.02
 PROCESSES = 20
 
 BASE = Path(yaml.safe_load(SETTINGS.read_text())["base_paths"]["linux" if sys.platform.startswith("linux") else "windows"])
 
 
-def combo_name(p, n):
-    return f"p{p:.3f}_mcs{n:02d}"
+def combo_name(p, n, ps=SHIP_DEFAULT, smcs=None):
+    """Folder name of a combination: p<p_plume>_mcs<plume_min_cluster_size>, then _ps<p_ship> unless 0.02 (rounds 1
+    and 2), or _ps<p_ship>_smcs<ship_min_cluster_size> when the ship cluster size is varied (round 3)."""
+    name = f"p{p:.3f}_mcs{n:02d}"
+    if smcs is not None:
+        return name + f"_ps{ps:g}_smcs{smcs}"
+    return name + ("" if ps == SHIP_DEFAULT else f"_ps{ps:.3f}")
 
 
-def write_settings(p, n):
-    """Settings of one combination, saved in its result folder; returns the path."""
+def write_settings(p, n, ps, smcs, round_name):
+    """Settings of one combination (None: value of the settings file), saved in its result folder; returns
+    (name, path)."""
     settings = yaml.safe_load(SETTINGS.read_text())
-    settings["processing"]["detection"]["p_threshold_plume"] = p
-    settings["processing"]["detection"]["plume_min_cluster_size"] = n
-    name = combo_name(p, n)
+    det = settings["processing"]["detection"]
+    for key, value in (("p_threshold_plume", p), ("plume_min_cluster_size", n), ("p_threshold_ship", ps),
+                       ("ship_min_cluster_size", smcs)):
+        if value is not None:
+            det[key] = value
+    p, n, ps = det["p_threshold_plume"], det["plume_min_cluster_size"], det["p_threshold_ship"]
+    name = combo_name(p, n, ps, det["ship_min_cluster_size"] if round_name == "round3" else None)
     settings["Output"].update({
         "plots_out_dir": f"{STUDY_DIR}/{name}/analysis",
         "plume_out_dir": f"{STUDY_DIR}/{name}/plumes",
@@ -56,10 +80,11 @@ def write_settings(p, n):
     })
     out = BASE / STUDY_DIR / name / "settings.yaml"
     (out.parent / "logs").mkdir(parents=True, exist_ok=True)
-    header = (f"# GENERATED by {Path(__file__).name} from {SETTINGS.name}: detection p_threshold_plume = {p}, "
-              f"plume_min_cluster_size = {n}, Output in {STUDY_DIR}/{name}\n")
+    header = (f"# GENERATED by {Path(__file__).name} ({round_name}) from {SETTINGS.name}: detection p_threshold_plume = {p}, "
+              f"plume_min_cluster_size = {n}, p_threshold_ship = {ps}, ship_min_cluster_size = "
+              f"{det['ship_min_cluster_size']}, Output in {STUDY_DIR}/{name}\n")
     out.write_text(header + yaml.safe_dump(settings, sort_keys=False, allow_unicode=True))
-    return out
+    return name, out
 
 
 def run_day(job):
@@ -80,10 +105,15 @@ def run_day(job):
 
 
 if __name__ == "__main__":
-    combos = [(combo_name(p, n), write_settings(p, n)) for p, n in itertools.product(P_THRESHOLDS, MIN_CLUSTER_SIZES)]
-    print(f"{len(combos)} combinations x {len(TEST_DATES)} days -> {BASE / STUDY_DIR}", flush=True)
-    with multiprocessing.Pool(processes=min(PROCESSES, len(TEST_DATES))) as pool:
-        results = [r for day in pool.imap_unordered(run_day, [(d, combos) for d in TEST_DATES]) for r in day]
+    round_name = sys.argv[1] if len(sys.argv) > 1 else "round3"
+    r = ROUNDS[round_name]
+    combos = [write_settings(p, n, ps, smcs, round_name)
+              for ps, smcs, p, n in itertools.product(r["p_threshold_ship"], r["ship_min_cluster_size"],
+                                                      r["p_threshold_plume"], r["plume_min_cluster_size"])]
+    dates = r["dates"]
+    print(f"{round_name}: {len(combos)} combinations x {len(dates)} days {dates} -> {BASE / STUDY_DIR}", flush=True)
+    with multiprocessing.Pool(processes=min(PROCESSES, len(dates))) as pool:
+        results = [r for day in pool.imap_unordered(run_day, [(d, combos) for d in dates]) for r in day]
 
     failed = [(c, d) for c, d, s in results if s not in (0, "skipped")]
     print(f"done: {sum(s == 0 for _, _, s in results)} ok, {sum(s == 'skipped' for _, _, s in results)} skipped, "

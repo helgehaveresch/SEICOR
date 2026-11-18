@@ -1,0 +1,47 @@
+skip p0.010_mcs05_ps0.010: 0/20 days
+skip p0.010_mcs05_ps0.015: 3/20 days
+skip p0.010_mcs15_ps0.010: 0/20 days
+skip p0.010_mcs15_ps0.015: 0/20 days
+skip p0.010_mcs25_ps0.010: 0/20 days
+skip p0.010_mcs25_ps0.015: 0/20 days
+skip p0.015_mcs05_ps0.010: 0/20 days
+skip p0.015_mcs05_ps0.015: 0/20 days
+skip p0.015_mcs15_ps0.010: 0/20 days
+skip p0.015_mcs15_ps0.015: 0/20 days
+skip p0.015_mcs25_ps0.010: 0/20 days
+skip p0.015_mcs25_ps0.015: 0/20 days
+skip p0.020_mcs05_ps0.010: 0/20 days
+skip p0.020_mcs05_ps0.015: 0/20 days
+skip p0.020_mcs15_ps0.010: 0/20 days
+skip p0.020_mcs15_ps0.015: 0/20 days
+skip p0.020_mcs25_ps0.010: 0/20 days
+skip p0.020_mcs25_ps0.015: 0/20 days
+skip p0.025_mcs05_ps0.010: 0/20 days
+skip p0.025_mcs05_ps0.015: 0/20 days
+skip p0.025_mcs15_ps0.010: 0/20 days
+skip p0.025_mcs15_ps0.015: 0/20 days
+skip p0.025_mcs25_ps0.010: 0/20 days
+skip p0.025_mcs25_ps0.015: 0/20 days
+60 complete combinations
+989 passes
+250328: 34 passes, 1 null windows so far
+250405: 76 passes, 11 null windows so far
+250416: 117 passes, 29 null windows so far
+250511: 182 passes, 42 null windows so far
+250520: 241 passes, 67 null windows so far
+250531: 288 passes, 91 null windows so far
+250622: 344 passes, 116 null windows so far
+250707: 403 passes, 141 null windows so far
+250813: 467 passes, 154 null windows so far
+250830: 513 passes, 168 null windows so far
+250923: 570 passes, 182 null windows so far
+251006: 609 passes, 192 null windows so far
+251219: 644 passes, 200 null windows so far
+260120: 678 passes, 210 null windows so far
+260217: 699 passes, 219 null windows so far
+260309: 735 passes, 227 null windows so far
+260402: 783 passes, 245 null windows so far
+260418: 819 passes, 260 null windows so far
+260529: 879 passes, 281 null windows so far
+260602: 956 passes, 305 null windows so far
+recommended: p0.010_mcs80_ps0.010  (written to /misc/dodecagon/BREDOM/SEICOR/parameter_study_detection/evaluation)
